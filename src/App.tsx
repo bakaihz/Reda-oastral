@@ -163,7 +163,7 @@ export default function App() {
                   value={ra}
                   onChange={(e) => setRa(e.target.value)}
                   className="block w-full pl-11 pr-4 py-3 bg-black/40 border border-white/10 rounded-xl text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500/50 transition-all"
-                  placeholder="Ex: 123456789sp"
+                  placeholder="Seu RA (ex: 123456789sp)"
                   required
                 />
               </div>

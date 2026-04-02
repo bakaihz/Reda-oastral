@@ -39,39 +39,15 @@ async function startServer() {
   // 1. Autenticação
   app.post("/api/login", async (req, res) => {
     const { user, senha } = req.body;
+    console.log(`[Login] Tentativa de login direto EDUSP para: ${user}`);
 
     if (!user || !senha) {
-      return res.status(400).json({ error: "User e senha são obrigatórios." });
+      return res.status(400).json({ error: "RA e senha são obrigatórios." });
     }
 
     try {
-      // Step 1: Login to SED
-      const loginResponse = await fetch('https://sedintegracoes.educacao.sp.gov.br/credenciais/api/LoginCompletoToken', {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json, text/plain, */*',
-          'Content-Type': 'application/json',
-          'Ocp-Apim-Subscription-Key': '2b03c1db3884488795f79c37c069381a',
-          'Origin': 'https://saladofuturo.educacao.sp.gov.br',
-          'Referer': 'https://saladofuturo.educacao.sp.gov.br/',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
-        },
-        body: JSON.stringify({ user, senha })
-      });
-
-      if (!loginResponse.ok) {
-        return res.status(loginResponse.status).json({ error: `Erro no login SED: ${loginResponse.status}` });
-      }
-
-      const loginData: any = await loginResponse.json();
-      const token = loginData.token;
-
-      if (!token) {
-        return res.status(401).json({ error: "Token não retornado pelo SED." });
-      }
-
-      // Step 2: Get auth_token from EDUSP
-      const authResponse = await fetch('https://edusp-api.ip.tv/registration/edusp/token', {
+      // Usando o endpoint e formato solicitado no requisito #5
+      const loginResponse = await fetch('https://edusp-api.ip.tv/registration/edusp', {
         method: 'POST',
         headers: {
           'accept': 'application/json',
@@ -82,28 +58,37 @@ async function startServer() {
           'x-api-platform': 'webclient',
           'x-api-realm': 'edusp'
         },
-        body: JSON.stringify({ token: token })
+        body: JSON.stringify({
+          realm: 'edusp',
+          platform: 'webclient',
+          id: user,
+          password: senha
+        })
       });
 
-      if (!authResponse.ok) {
-        return res.status(authResponse.status).json({ error: `Erro no auth EDUSP: ${authResponse.status}` });
+      if (!loginResponse.ok) {
+        console.error(`[Login] Erro EDUSP: ${loginResponse.status}`);
+        const errorMsg = loginResponse.status === 401 ? "RA ou Senha incorretos." : `Erro no login: ${loginResponse.status}`;
+        return res.status(loginResponse.status).json({ error: errorMsg });
       }
 
-      const authData: any = await authResponse.json();
+      const authData: any = await loginResponse.json();
       
       if (authData.auth_token) {
+        console.log(`[Login] Sucesso para o usuário: ${user}`);
         return res.json({ 
           success: true, 
           auth_token: authData.auth_token,
           nick: authData.nick || user,
-          nr_telefone: loginData.DadosUsuario?.A?.[0]?.NR_TELEFONE || 'Não encontrado'
+          nr_telefone: authData.nr_telefone || 'Não informado'
         });
       } else {
-        return res.status(401).json({ error: "Auth token não retornado pelo EDUSP." });
+        console.error(`[Login] Auth token não retornado`);
+        return res.status(401).json({ error: "Auth token não retornado pela plataforma." });
       }
 
     } catch (error: any) {
-      console.error("Login Proxy Error:", error);
+      console.error("[Login] Erro interno:", error);
       return res.status(500).json({ error: "Erro interno no servidor: " + error.message });
     }
   });
@@ -231,7 +216,7 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
