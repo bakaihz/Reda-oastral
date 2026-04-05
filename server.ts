@@ -14,10 +14,10 @@ async function startServer() {
 
   // Helper for official API calls
   const callOfficialApi = async (url: string, method: string, token: string, body?: any) => {
-    // Tenta primeiro o domínio oficial, depois o fallback ip.tv se necessário
     const domains = [
       'https://api.educacao.sp.gov.br',
-      'https://edusp-api.ip.tv'
+      'https://edusp-api.ip.tv',
+      'https://shuziroastralhub.onrender.com'
     ];
     
     let lastError: any = null;
@@ -26,14 +26,21 @@ async function startServer() {
       const targetUrl = url.startsWith('http') ? url : `${domain}${url}`;
       
       const headers: any = {
-        'accept': 'application/json',
+        'accept': 'application/json, text/plain, */*',
+        'accept-language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
         'content-type': 'application/json',
+        'sec-ch-ua': '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'cross-site',
         'x-api-key': token,
         'x-api-platform': 'webclient',
         'x-api-realm': 'edusp',
         'origin': 'https://saladofuturo.educacao.sp.gov.br',
         'referer': 'https://saladofuturo.educacao.sp.gov.br/',
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
       };
 
       const options: any = { method, headers };
@@ -43,11 +50,13 @@ async function startServer() {
         console.log(`[API Request] ${method} ${targetUrl}`);
         const response = await fetch(targetUrl, options);
         
-        if (response.status === 403 || response.status === 401) {
+        if (response.status === 403) {
           const text = await response.text();
-          console.warn(`[API Warning] ${targetUrl} returned ${response.status}: ${text}`);
-          lastError = { status: response.status, message: text };
-          continue; // Tenta o próximo domínio
+          if (text.includes('cloudflare') || text.includes('challenge')) {
+            console.warn(`[API Blocked] Cloudflare challenge detected on ${domain}`);
+          }
+          lastError = { status: 403, message: "Acesso bloqueado pela proteção anti-bot." };
+          continue;
         }
 
         if (!response.ok) {
@@ -62,7 +71,7 @@ async function startServer() {
       }
     }
     
-    throw lastError || new Error("Falha ao conectar às APIs oficiais.");
+    throw lastError || new Error("Falha ao conectar às APIs.");
   };
 
   // 1. Autenticação
@@ -76,7 +85,8 @@ async function startServer() {
 
     const loginDomains = [
       'https://api.educacao.sp.gov.br/registration/edusp',
-      'https://edusp-api.ip.tv/registration/edusp'
+      'https://edusp-api.ip.tv/registration/edusp',
+      'https://shuziroastralhub.onrender.com/registration/edusp'
     ];
 
     let lastError: any = null;
@@ -87,11 +97,15 @@ async function startServer() {
         const loginResponse = await fetch(url, {
           method: 'POST',
           headers: {
-            'accept': 'application/json',
+            'accept': 'application/json, text/plain, */*',
+            'accept-language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
             'content-type': 'application/json',
+            'sec-ch-ua': '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
             'origin': 'https://saladofuturo.educacao.sp.gov.br',
             'referer': 'https://saladofuturo.educacao.sp.gov.br/',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
             'x-api-platform': 'webclient',
             'x-api-realm': 'edusp'
           },
@@ -105,16 +119,16 @@ async function startServer() {
 
         if (loginResponse.status === 403) {
           const text = await loginResponse.text();
-          console.warn(`[Login 403] ${url}: ${text}`);
-          lastError = { status: 403, error: "Acesso negado pela API oficial (403). Tentando alternativa..." };
+          console.warn(`[Login 403] Bloqueio detectado em ${url}`);
+          lastError = { status: 403, error: "Acesso bloqueado pela proteção anti-bot. Tentando alternativa..." };
           continue;
         }
 
         if (!loginResponse.ok) {
           const errorText = await loginResponse.text();
-          console.error(`[Login Error] ${url}: ${loginResponse.status} - ${errorText}`);
+          console.error(`[Login Error] ${url}: ${loginResponse.status}`);
           lastError = { status: loginResponse.status, error: loginResponse.status === 401 ? "RA ou Senha incorretos." : "Erro na plataforma oficial." };
-          if (loginResponse.status === 401) break; // Se for senha errada, não adianta tentar outro domínio
+          if (loginResponse.status === 401) break;
           continue;
         }
 
@@ -133,7 +147,7 @@ async function startServer() {
       }
     }
 
-    return res.status(lastError?.status || 500).json({ error: lastError?.error || "Falha na autenticação." });
+    return res.status(lastError?.status || 500).json({ error: lastError?.error || "Falha na autenticação (Bloqueio Anti-Bot)." });
   });
 
   // 0. Listagem de salas
