@@ -1,4 +1,4 @@
-import { useState, useEffect, FormEvent, useMemo } from 'react';
+import { useState, useEffect, useRef, FormEvent, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   User, Lock, ArrowRight, Sparkles, BookOpen, Clock, LogOut, 
@@ -205,11 +205,13 @@ export default function App() {
               headers: { 'x-api-key': authToken }
             });
             data = await response.json();
-            essaysArray = Array.isArray(data) ? data : (data.results || data.data || []);
+            // Robust extraction
+            essaysArray = Array.isArray(data) ? data : (data.results || data.data || data.tasks || data.items || []);
           }
           
-          console.log(`[Frontend] Room ${room.name} returned:`, data);
-          if (Array.isArray(essaysArray)) {
+          console.log(`[Frontend] Room ${room.name} returned ${essaysArray.length} essays`);
+          
+          if (Array.isArray(essaysArray) && essaysArray.length > 0) {
             // Add room info to each essay
             const essaysWithRoom = essaysArray.map(e => ({
               ...e,
@@ -218,10 +220,12 @@ export default function App() {
             }));
             allAggregated.push(...essaysWithRoom);
           } else {
-            console.warn(`[Frontend] Room ${room.name} did not return an array:`, data);
+            console.warn(`[Frontend] Room ${room.name} returned no essays or invalid format:`, data);
           }
         } catch (err) {
           console.error(`Error fetching essays for room ${room.name}:`, err);
+          // Show error in UI
+          setMessage({ type: 'error', text: `Erro ao buscar redações na sala ${room.name}.` });
         }
       }
 
@@ -487,8 +491,11 @@ export default function App() {
     }
   };
 
+  const hasFetchedRooms = useRef(false);
+
   useEffect(() => {
-    if (isLoggedIn && authToken) {
+    if (isLoggedIn && authToken && !hasFetchedRooms.current) {
+      hasFetchedRooms.current = true;
       fetchRooms();
     }
   }, [isLoggedIn, authToken]);
@@ -1064,12 +1071,16 @@ export default function App() {
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.5, delay: 0.2 }}
-          className="glass border border-white/10 rounded-[40px] p-10 shadow-2xl relative overflow-hidden"
+          className="glass border border-white/10 rounded-[40px] p-10 shadow-2xl relative overflow-hidden flex flex-col md:flex-row items-center gap-10"
         >
-          {/* Decorative light */}
-          <div className="absolute -top-20 -right-20 w-40 h-40 bg-blue-600/20 rounded-full blur-3xl" />
+          <img 
+            src="https://images.alphacoders.com/112/1125219.jpg" 
+            alt="Satoru Gojo" 
+            className="w-full md:w-80 h-64 md:h-auto object-cover rounded-3xl border border-white/10"
+            referrerPolicy="no-referrer"
+          />
           
-          <form onSubmit={handleLogin} className="space-y-8 relative z-10">
+          <form onSubmit={handleLogin} className="space-y-8 relative z-10 flex-1 w-full">
             <AnimatePresence mode="wait">
               {message && (
                 <motion.div

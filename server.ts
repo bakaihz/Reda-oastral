@@ -196,20 +196,18 @@ async function startServer() {
       const url = `/tms/task/todo?publication_target=${encodeURIComponent(target as string)}&limit=100&offset=0&is_essay=true&answer_status=pending,draft&answer_statuses=pending&answer_statuses=draft`;
       console.log(`[API] Trying standard essay filter: ${url}`);
       let rawData = await callOfficialApi(url, 'GET', token);
-      let data = Array.isArray(rawData) ? rawData : (rawData.results || rawData.data || []);
-      console.log(`[API] Standard filter returned:`, JSON.stringify(data).substring(0, 200));
+      
+      // Defensive extraction: ensure we always return an array
+      let data = Array.isArray(rawData) ? rawData : (rawData.results || rawData.data || rawData.tasks || rawData.items || []);
       
       // 2. If empty, try without is_essay filter but still with status
       if (Array.isArray(data) && data.length === 0) {
         console.log(`[API] No essays found with is_essay=true, trying without filter for room ${target}`);
         const fallbackUrl = `/tms/task/todo?publication_target=${encodeURIComponent(target as string)}&limit=100&offset=0&answer_status=pending,draft&answer_statuses=pending&answer_statuses=draft`;
-        console.log(`[API] Trying fallback filter: ${fallbackUrl}`);
         const fallbackRawData = await callOfficialApi(fallbackUrl, 'GET', token);
-        const fallbackData = Array.isArray(fallbackRawData) ? fallbackRawData : (fallbackRawData.results || fallbackRawData.data || []);
-        console.log(`[API] Fallback filter returned:`, JSON.stringify(fallbackData).substring(0, 200));
+        const fallbackData = Array.isArray(fallbackRawData) ? fallbackRawData : (fallbackRawData.results || fallbackRawData.data || fallbackRawData.tasks || fallbackRawData.items || []);
         
         if (Array.isArray(fallbackData)) {
-          // Filter for essays manually if the API filter didn't work
           data = fallbackData.filter((task: any) => task.is_essay === true || task.type === 'essay' || task.title?.toLowerCase().includes('redação'));
         }
       }
@@ -218,10 +216,8 @@ async function startServer() {
       if (Array.isArray(data) && data.length === 0) {
         console.log(`[API] Still empty, trying broad search for room ${target}`);
         const broadUrl = `/tms/task/todo?publication_target=${encodeURIComponent(target as string)}&limit=100&offset=0`;
-        console.log(`[API] Trying broad filter: ${broadUrl}`);
         const broadRawData = await callOfficialApi(broadUrl, 'GET', token);
-        const broadData = Array.isArray(broadRawData) ? broadRawData : (broadRawData.results || broadRawData.data || []);
-        console.log(`[API] Broad filter returned:`, JSON.stringify(broadData).substring(0, 200));
+        const broadData = Array.isArray(broadRawData) ? broadRawData : (broadRawData.results || broadRawData.data || broadRawData.tasks || broadRawData.items || []);
         if (Array.isArray(broadData)) {
           data = broadData.filter((task: any) => 
             (task.is_essay === true || task.type === 'essay' || task.title?.toLowerCase().includes('redação')) &&
@@ -231,9 +227,6 @@ async function startServer() {
       }
       
       res.json(data);
-    } catch (error: any) {
-      res.status(error.status || 500).json({ error: error.message });
-    }
   });
 
   // 2. Obter detalhes de uma redação
