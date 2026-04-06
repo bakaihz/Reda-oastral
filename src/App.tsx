@@ -155,12 +155,14 @@ export default function App() {
         headers: { 'x-api-key': authToken }
       });
       const data = await response.json();
-      if (Array.isArray(data)) {
-        setRooms(data);
-        if (data.length > 0 && !selectedRoom) {
-          setSelectedRoom(data[0].name);
+      const roomsArray = Array.isArray(data) ? data : (data.results || data.data || []);
+      
+      if (Array.isArray(roomsArray)) {
+        setRooms(roomsArray);
+        if (roomsArray.length > 0 && !selectedRoom) {
+          setSelectedRoom(roomsArray[0].name);
         }
-        return data;
+        return roomsArray;
       }
       return [];
     } catch (error) {
@@ -179,22 +181,44 @@ export default function App() {
       const allRooms = await fetchRooms();
       const allAggregated: any[] = [];
 
+      if (allRooms.length === 0) {
+        console.warn('[Frontend] No rooms found.');
+      }
+
       // 2. For each room, fetch pending/draft essays
       for (const room of allRooms) {
         if (!room || !room.name) continue;
+        console.log(`[Frontend] Fetching essays for room: ${room.name}`);
         
         try {
-          const response = await fetch(`/api/redacoes/pending?publication_target=${encodeURIComponent(room.name)}`, {
+          // Try with room name first
+          let response = await fetch(`/api/redacoes/pending?publication_target=${encodeURIComponent(room.name)}&room_id=${encodeURIComponent(room.id)}`, {
             headers: { 'x-api-key': authToken }
           });
-          const data = await response.json();
-          if (Array.isArray(data)) {
+          let data = await response.json();
+          let essaysArray = Array.isArray(data) ? data : (data.results || data.data || []);
+          
+          // If empty, try with room ID as publication_target
+          if (essaysArray.length === 0 && room.id) {
+            console.log(`[Frontend] Room ${room.name} returned empty, trying with ID: ${room.id}`);
+            response = await fetch(`/api/redacoes/pending?publication_target=${encodeURIComponent(room.id)}`, {
+              headers: { 'x-api-key': authToken }
+            });
+            data = await response.json();
+            essaysArray = Array.isArray(data) ? data : (data.results || data.data || []);
+          }
+          
+          console.log(`[Frontend] Room ${room.name} returned:`, data);
+          if (Array.isArray(essaysArray)) {
             // Add room info to each essay
-            const essaysWithRoom = data.map(e => ({
+            const essaysWithRoom = essaysArray.map(e => ({
               ...e,
-              publication_target: room.name
+              publication_target: room.name,
+              room_id: room.id
             }));
             allAggregated.push(...essaysWithRoom);
+          } else {
+            console.warn(`[Frontend] Room ${room.name} did not return an array:`, data);
           }
         } catch (err) {
           console.error(`Error fetching essays for room ${room.name}:`, err);
@@ -224,12 +248,28 @@ export default function App() {
     setIsFetchingData(true);
 
     try {
-      const response = await fetch(`/api/redacoes/pending?publication_target=${encodeURIComponent(roomName)}`, {
+      // Try with room name first
+      let response = await fetch(`/api/redacoes/pending?publication_target=${encodeURIComponent(roomName)}`, {
         headers: { 'x-api-key': authToken }
       });
-      const data = await response.json();
-      if (Array.isArray(data)) {
-        setEssays(data);
+      let data = await response.json();
+      let essaysArray = Array.isArray(data) ? data : (data.results || data.data || []);
+      
+      // If empty, try to find the room ID and try with it
+      if (essaysArray.length === 0) {
+        const room = rooms.find(r => r.name === roomName);
+        if (room && room.id) {
+          console.log(`[Frontend] Single room ${roomName} returned empty, trying with ID: ${room.id}`);
+          response = await fetch(`/api/redacoes/pending?publication_target=${encodeURIComponent(room.id)}`, {
+            headers: { 'x-api-key': authToken }
+          });
+          data = await response.json();
+          essaysArray = Array.isArray(data) ? data : (data.results || data.data || []);
+        }
+      }
+      
+      if (Array.isArray(essaysArray)) {
+        setEssays(essaysArray);
       }
     } catch (error) {
       console.error('Error fetching essays:', error);
@@ -266,15 +306,42 @@ export default function App() {
       setBatchStatus(prev => ({ ...prev, [essay.id]: 'processing' }));
       
       try {
-        // 1. Get Details (getTaskDetails)
         const detailsRes = await fetch(`/api/redacao/${essay.id}/detalhes?room_name=${encodeURIComponent(essay.publication_target)}`, {
           headers: { 'x-api-key': authToken }
         });
         const details = await detailsRes.json();
+        console.log(`[Batch] Details for task ${essay.id}:`, JSON.stringify(details).substring(0, 500));
+
+        const question = details.questions?.[0];
+        if (!question) {
+            console.error(`[Batch] No questions found for task ${essay.id}`);
+            setBatchStatus(prev => ({ ...prev, [essay.id]: 'error' }));
+            continue;
+        }
 
         // 2. Build Prompt (stripHtml and format)
-        const enunciado = stripHtml(details.description || '');
-        const motivadores = details.essay_motivation_texts?.map((t: any, idx: number) => `TEXTO ${idx + 1}: ${stripHtml(t.text)}`).join('\n') || '';
+        const enunciado = stripHtml(question.statement || '');
+        const supportTextHtml = question.options?.support_text || '';
+        
+        // Helper to format support texts
+        const formatSupportTexts = (html: string) => {
+            // This is a simplified parser. It assumes sections are separated by <strong>TEXTO I</strong>, etc.
+            const sections = html.split(/(?=<strong>TEXTO\s+[IVX]+<\/strong>)/i);
+            
+            return sections.map(section => {
+                const titleMatch = section.match(/<strong>(TEXTO\s+[IVX]+)<\/strong>/i);
+                if (!titleMatch) return null; // Ignore sections without title
+                
+                const title = titleMatch[1];
+                const content = stripHtml(section.replace(titleMatch[0], ''));
+                
+                if (!content && !section.includes('<img')) return null;
+                
+                return `${title}: ${section.includes('<img') ? '[IMAGEM]' : content}`;
+            }).filter(s => s !== null).join('\n\n');
+        };
+
+        const motivadores = formatSupportTexts(supportTextHtml);
         const prompt = `ENUNCIADO: ${enunciado}\n\n${motivadores}`;
 
         // 3. Generate AI
@@ -282,11 +349,15 @@ export default function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ 
-            genero: details.essay_genre_name,
+            genero: question.options?.genre?.statement || "Dissertativo-argumentativo",
             contexto: prompt
           })
         });
         const aiData = await aiRes.json();
+        
+        // Pós-processamento
+        const titulo = (aiData.titulo || '').replace(/\*/g, '').trim();
+        const texto = (aiData.texto || '').replace(/\n{3,}/g, '\n\n').trim();
 
         // 4. Save Draft (Complete)
         const saveRes = await fetch('/api/complete', {
@@ -294,11 +365,11 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             task_id: essay.id,
-            question_id: details.questions?.[0]?.id,
+            question_id: question.id,
             room_for_apply: essay.publication_target,
             auth_token: authToken,
-            titulo: aiData.titulo,
-            texto: aiData.texto,
+            titulo: titulo,
+            texto: texto,
             answer_id: essay.answer_id
           })
         });
@@ -442,8 +513,8 @@ export default function App() {
   const stats = useMemo(() => {
     return {
       total: essays.length,
-      pending: essays.filter(e => e.answer_status === 'pending').length,
-      drafts: essays.filter(e => e.answer_status === 'draft').length
+      pending: essays.filter(e => e.answer_status?.toLowerCase() === 'pending').length,
+      drafts: essays.filter(e => e.answer_status?.toLowerCase() === 'draft').length
     };
   }, [essays]);
 
@@ -1101,8 +1172,8 @@ export default function App() {
             >
               <div className="flex justify-between items-start mb-8">
                 <div>
-                  <h3 className="text-3xl font-display font-bold text-white mb-2">Processamento Astral</h3>
-                  <p className="text-gray-400 text-sm">Selecione as redações para manifestação automática via IA.</p>
+                  <h3 className="text-3xl font-display font-bold text-white mb-2">Redações Pendentes</h3>
+                  <p className="text-gray-400 text-sm">Escolha uma redação abaixo para começar a escrever.</p>
                 </div>
                 <button 
                   onClick={() => !isBatchProcessing && setShowSelectionModal(false)} 
@@ -1129,79 +1200,51 @@ export default function App() {
               )}
 
               <div className="flex items-center justify-between mb-6 px-2">
-                <button 
-                  onClick={selectAllEssays}
-                  disabled={isBatchProcessing}
-                  className="text-[10px] font-bold text-blue-400 hover:text-blue-300 transition-colors uppercase tracking-widest disabled:opacity-50"
-                >
-                  {selectedEssays.size === aggregatedEssays.length ? 'Desmarcar Todas' : 'Selecionar Todas'}
-                </button>
                 <span className="text-[10px] text-gray-600 font-bold uppercase tracking-widest">
-                  {selectedEssays.size} selecionadas
+                  {aggregatedEssays.length} redações encontradas
                 </span>
               </div>
 
               <div className="flex-1 overflow-y-auto space-y-3 pr-4 custom-scrollbar mb-8">
-                {aggregatedEssays.map((essay) => (
-                  <div 
-                    key={essay.id}
-                    onClick={() => !isBatchProcessing && toggleEssaySelection(essay.id)}
-                    className={`flex items-center gap-5 p-5 rounded-3xl border transition-all ${
-                      isBatchProcessing ? 'cursor-default' : 'cursor-pointer'
-                    } ${
-                      selectedEssays.has(essay.id) 
-                        ? 'bg-blue-600/10 border-blue-500/30' 
-                        : 'bg-white/5 border-white/5 hover:bg-white/10'
-                    }`}
-                  >
-                    <div className={`w-6 h-6 rounded-xl border flex items-center justify-center transition-all ${
-                      selectedEssays.has(essay.id) ? 'bg-blue-600 border-blue-500 shadow-lg shadow-blue-600/20' : 'border-white/10'
-                    }`}>
-                      {selectedEssays.has(essay.id) && <CheckCircle2 className="w-4 h-4 text-white" />}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <h4 className="text-sm font-bold text-white truncate">{essay.title}</h4>
-                      <div className="flex items-center gap-3 mt-1">
-                        <span className="text-[9px] text-gray-600 font-bold uppercase tracking-widest">ID: {essay.id}</span>
-                        <span className="text-[9px] text-blue-400 font-bold uppercase tracking-widest">• {essay.publication_target}</span>
-                        <span className={`text-[9px] font-bold uppercase tracking-widest ${essay.answer_status === 'draft' ? 'text-amber-500' : 'text-blue-500'}`}>
-                          • {essay.answer_status === 'draft' ? 'Rascunho' : 'Pendente'}
-                        </span>
+                {aggregatedEssays.length > 0 ? (
+                  aggregatedEssays.map((essay) => (
+                    <div 
+                      key={essay.id}
+                      className="flex items-center gap-5 p-5 rounded-3xl border transition-all bg-white/5 border-white/5 hover:bg-white/10"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <h4 className="text-sm font-bold text-white truncate">{essay.title}</h4>
+                        <div className="flex items-center gap-3 mt-1">
+                          <span className="text-[9px] text-gray-600 font-bold uppercase tracking-widest">ID: {essay.id}</span>
+                          <span className="text-[9px] text-blue-400 font-bold uppercase tracking-widest">• {essay.publication_target}</span>
+                          <span className={`text-[9px] font-bold uppercase tracking-widest ${essay.answer_status === 'draft' ? 'text-amber-500' : 'text-blue-500'}`}>
+                            • {essay.answer_status === 'draft' ? 'Rascunho' : 'Pendente'}
+                          </span>
+                        </div>
                       </div>
+                      <button
+                        onClick={() => {
+                          setShowSelectionModal(false);
+                          // Assuming there's a function to open the editor for a specific essay
+                          // You might need to adjust this based on your existing editor logic
+                          // For now, I'll assume you have a way to set the active essay
+                          // setSelectedEssay(essay); 
+                          // setActiveTab('editor');
+                          console.log('Fazer Redação clicked for:', essay.id);
+                        }}
+                        className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl transition-all"
+                      >
+                        Fazer Redação
+                      </button>
                     </div>
-                    {batchStatus[essay.id] && (
-                      <div className="flex items-center gap-2">
-                        {batchStatus[essay.id] === 'processing' && <Loader2 className="w-5 h-5 animate-spin text-blue-500" />}
-                        {batchStatus[essay.id] === 'success' && <CheckCircle2 className="w-5 h-5 text-green-500" />}
-                        {batchStatus[essay.id] === 'error' && <AlertCircle className="w-5 h-5 text-red-500" />}
-                      </div>
-                    )}
-                  </div>
-                ))}
-                {aggregatedEssays.length === 0 && (
+                  ))
+                ) : (
                   <div className="py-20 text-center text-gray-500">
-                    Nenhuma redação encontrada para processamento.
+                    <p className="text-lg font-bold text-gray-400 mb-2">Nenhuma redação pendente!</p>
+                    <p className="text-sm">No momento, não há redações pendentes para processar.</p>
                   </div>
                 )}
               </div>
-
-              <button
-                onClick={handleBatchProcess}
-                disabled={isBatchProcessing || selectedEssays.size === 0}
-                className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold py-5 rounded-3xl transition-all shadow-xl shadow-blue-600/20 flex items-center justify-center gap-4 active:scale-[0.98]"
-              >
-                {isBatchProcessing ? (
-                  <>
-                    <Loader2 className="w-6 h-6 animate-spin" />
-                    Manifestando...
-                  </>
-                ) : (
-                  <>
-                    <Wand2 className="w-6 h-6" />
-                    Salvar como Rascunho ({selectedEssays.size})
-                  </>
-                )}
-              </button>
             </motion.div>
           </div>
         )}

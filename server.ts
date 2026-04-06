@@ -38,8 +38,8 @@ async function startServer() {
         'x-api-key': token,
         'x-api-platform': 'webclient',
         'x-api-realm': 'edusp',
-        'origin': 'https://saladofuturo.educacao.sp.gov.br',
-        'referer': 'https://saladofuturo.educacao.sp.gov.br/',
+        'origin': domain,
+        'referer': `${domain}/`,
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
       };
 
@@ -65,10 +65,13 @@ async function startServer() {
 
         if (!response.ok) {
           const errorText = await response.text();
+          console.error(`[API Error Response] ${targetUrl}: ${response.status}`, errorText);
           throw { status: response.status, message: errorText };
         }
         
-        return await response.json();
+        const data = await response.json();
+        console.log(`[API Success] ${targetUrl} returned ${Array.isArray(data) ? data.length + ' items' : 'an object'}`);
+        return data;
       } catch (error: any) {
         const errorMsg = error.name === 'AbortError' ? 'Tempo limite de conexão excedido.' : (error.message || error);
         console.warn(`[API Attempt Failed] ${targetUrl}: ${errorMsg}`); // Changed to warn
@@ -100,6 +103,7 @@ async function startServer() {
 
     for (const url of loginDomains) {
       try {
+        const domain = new URL(url).origin;
         console.log(`[Login Request] ${url}`);
         const loginResponse = await fetch(url, {
           method: 'POST',
@@ -110,8 +114,8 @@ async function startServer() {
             'sec-ch-ua': '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
             'sec-ch-ua-mobile': '?0',
             'sec-ch-ua-platform': '"Windows"',
-            'origin': 'https://saladofuturo.educacao.sp.gov.br',
-            'referer': 'https://saladofuturo.educacao.sp.gov.br/',
+            'origin': domain,
+            'referer': `${domain}/`,
             'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
             'x-api-platform': 'webclient',
             'x-api-realm': 'edusp'
@@ -167,7 +171,12 @@ async function startServer() {
 
     try {
       const data = await callOfficialApi('/room/user?list_all=true&with_cards=true', 'GET', token);
-      res.json(data);
+      
+      // Handle cases where data is an object with a 'results' or 'data' property
+      const rooms = Array.isArray(data) ? data : (data.results || data.data || []);
+      console.log(`[API] /api/rooms returned ${Array.isArray(rooms) ? rooms.length : 'unknown'} rooms`);
+      
+      res.json(rooms);
     } catch (error: any) {
       res.status(error.status || 500).json({ error: error.message });
     }
@@ -176,12 +185,51 @@ async function startServer() {
   // 1. Listagem de redações pendentes
   app.get("/api/redacoes/pending", async (req, res) => {
     const token = req.headers['x-api-key'] as string;
-    const { publication_target } = req.query;
+    const { publication_target, room_id } = req.query;
     if (!token) return res.status(401).json({ error: "Token ausente" });
 
+    const target = room_id || publication_target;
+    console.log(`[API] Fetching pending essays for target: ${target}`);
+
     try {
-      const url = `/tms/task/todo?publication_target=${publication_target}&limit=100&offset=0&is_essay=true&answer_statuses=pending&answer_statuses=draft`;
-      const data = await callOfficialApi(url, 'GET', token);
+      // 1. Try with standard essay filters
+      const url = `/tms/task/todo?publication_target=${encodeURIComponent(target as string)}&limit=100&offset=0&is_essay=true&answer_status=pending,draft&answer_statuses=pending&answer_statuses=draft`;
+      console.log(`[API] Trying standard essay filter: ${url}`);
+      let rawData = await callOfficialApi(url, 'GET', token);
+      let data = Array.isArray(rawData) ? rawData : (rawData.results || rawData.data || []);
+      console.log(`[API] Standard filter returned:`, JSON.stringify(data).substring(0, 200));
+      
+      // 2. If empty, try without is_essay filter but still with status
+      if (Array.isArray(data) && data.length === 0) {
+        console.log(`[API] No essays found with is_essay=true, trying without filter for room ${target}`);
+        const fallbackUrl = `/tms/task/todo?publication_target=${encodeURIComponent(target as string)}&limit=100&offset=0&answer_status=pending,draft&answer_statuses=pending&answer_statuses=draft`;
+        console.log(`[API] Trying fallback filter: ${fallbackUrl}`);
+        const fallbackRawData = await callOfficialApi(fallbackUrl, 'GET', token);
+        const fallbackData = Array.isArray(fallbackRawData) ? fallbackRawData : (fallbackRawData.results || fallbackRawData.data || []);
+        console.log(`[API] Fallback filter returned:`, JSON.stringify(fallbackData).substring(0, 200));
+        
+        if (Array.isArray(fallbackData)) {
+          // Filter for essays manually if the API filter didn't work
+          data = fallbackData.filter((task: any) => task.is_essay === true || task.type === 'essay' || task.title?.toLowerCase().includes('redação'));
+        }
+      }
+
+      // 3. If still empty, try a broader search
+      if (Array.isArray(data) && data.length === 0) {
+        console.log(`[API] Still empty, trying broad search for room ${target}`);
+        const broadUrl = `/tms/task/todo?publication_target=${encodeURIComponent(target as string)}&limit=100&offset=0`;
+        console.log(`[API] Trying broad filter: ${broadUrl}`);
+        const broadRawData = await callOfficialApi(broadUrl, 'GET', token);
+        const broadData = Array.isArray(broadRawData) ? broadRawData : (broadRawData.results || broadRawData.data || []);
+        console.log(`[API] Broad filter returned:`, JSON.stringify(broadData).substring(0, 200));
+        if (Array.isArray(broadData)) {
+          data = broadData.filter((task: any) => 
+            (task.is_essay === true || task.type === 'essay' || task.title?.toLowerCase().includes('redação')) &&
+            (task.answer_status === 'pending' || task.answer_status === 'draft')
+          );
+        }
+      }
+      
       res.json(data);
     } catch (error: any) {
       res.status(error.status || 500).json({ error: error.message });
