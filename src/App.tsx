@@ -154,7 +154,14 @@ export default function App() {
       const response = await fetch('/api/rooms', {
         headers: { 'x-api-key': authToken }
       });
-      const data = await response.json();
+      const text = await response.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        console.error('Error parsing JSON:', text);
+        return [];
+      }
       const roomsArray = Array.isArray(data) ? data : (data.results || data.data || []);
       
       if (Array.isArray(roomsArray)) {
@@ -253,7 +260,7 @@ export default function App() {
 
     try {
       // Try with room name first
-      let response = await fetch(`/api/redacoes/pending?publication_target=${encodeURIComponent(roomName)}`, {
+      let response = await fetch(`/api/tms/task/todo?publication_target=${encodeURIComponent(roomName)}`, {
         headers: { 'x-api-key': authToken }
       });
       let data = await response.json();
@@ -264,7 +271,7 @@ export default function App() {
         const room = rooms.find(r => r.name === roomName);
         if (room && room.id) {
           console.log(`[Frontend] Single room ${roomName} returned empty, trying with ID: ${room.id}`);
-          response = await fetch(`/api/redacoes/pending?publication_target=${encodeURIComponent(room.id)}`, {
+          response = await fetch(`/api/tms/task/todo?publication_target=${encodeURIComponent(room.id)}`, {
             headers: { 'x-api-key': authToken }
           });
           data = await response.json();
@@ -1071,16 +1078,9 @@ export default function App() {
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.5, delay: 0.2 }}
-          className="glass border border-white/10 rounded-[40px] p-10 shadow-2xl relative overflow-hidden flex flex-col md:flex-row items-center gap-10"
+          className="glass border border-slate-200 rounded-[30px] p-10 shadow-lg relative overflow-hidden w-full max-w-md"
         >
-          <img 
-            src="https://images.alphacoders.com/112/1125219.jpg" 
-            alt="Satoru Gojo" 
-            className="w-full md:w-80 h-64 md:h-auto object-cover rounded-3xl border border-white/10"
-            referrerPolicy="no-referrer"
-          />
-          
-          <form onSubmit={handleLogin} className="space-y-8 relative z-10 flex-1 w-full">
+          <form onSubmit={handleLogin} className="space-y-6 relative z-10">
             <AnimatePresence mode="wait">
               {message && (
                 <motion.div
@@ -1102,13 +1102,13 @@ export default function App() {
               <label className="text-[10px] uppercase tracking-widest font-bold text-gray-500 ml-1">Registro Acadêmico (RA)</label>
               <div className="relative group">
                 <div className="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none">
-                  <User className="h-5 w-5 text-gray-600 group-focus-within:text-blue-400 transition-colors" />
+                  <User className="h-5 w-5 text-slate-400 group-focus-within:text-blue-900 transition-colors" />
                 </div>
                 <input
                   type="text"
                   value={ra}
                   onChange={(e) => setRa(e.target.value)}
-                  className="block w-full pl-14 pr-5 py-4 bg-black/40 border border-white/5 rounded-2xl text-white placeholder-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500/30 transition-all font-medium"
+                  className="block w-full pl-14 pr-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-900/20 focus:border-blue-900 transition-all font-medium"
                   placeholder="Seu RA (ex: 123456789sp)"
                   required
                 />
@@ -1116,23 +1116,23 @@ export default function App() {
             </div>
 
             <div className="space-y-3">
-              <label className="text-[10px] uppercase tracking-widest font-bold text-gray-500 ml-1">Senha de Acesso</label>
+              <label className="text-[10px] uppercase tracking-widest font-bold text-slate-500 ml-1">Senha de Acesso</label>
               <div className="relative group">
                 <div className="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none">
-                  <Lock className="h-5 w-5 text-gray-600 group-focus-within:text-blue-400 transition-colors" />
+                  <Lock className="h-5 w-5 text-slate-400 group-focus-within:text-blue-900 transition-colors" />
                 </div>
                 <input
                   type={showPassword ? "text" : "password"}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="block w-full pl-14 pr-12 py-4 bg-black/40 border border-white/5 rounded-2xl text-white placeholder-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500/30 transition-all font-medium"
+                  className="block w-full pl-14 pr-12 py-4 bg-slate-50 border border-slate-200 rounded-2xl text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-900/20 focus:border-blue-900 transition-all font-medium"
                   placeholder="••••••••"
                   required
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute inset-y-0 right-0 pr-4 flex items-center text-gray-600 hover:text-blue-400 transition-colors"
+                  className="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-400 hover:text-blue-900 transition-colors"
                 >
                   {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
                 </button>
@@ -1140,19 +1140,16 @@ export default function App() {
             </div>
 
             <button
-              type="submit"
-              disabled={isLoading}
-              className="relative w-full group overflow-hidden rounded-2xl bg-blue-600 py-4.5 font-bold text-white transition-all hover:bg-blue-500 active:scale-[0.98] disabled:opacity-70 shadow-xl shadow-blue-600/20"
+              type="button"
+              onClick={() => {
+                setShowSelectionModal(true);
+                fetchEssays(selectedRoom);
+              }}
+              className="relative w-full group overflow-hidden rounded-2xl bg-blue-900 py-4.5 font-bold text-white transition-all hover:bg-blue-800 active:scale-[0.98] disabled:opacity-70 shadow-md"
             >
               <span className="relative z-10 flex items-center justify-center gap-3">
-                {isLoading ? (
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                ) : (
-                  <>
-                    Entrar no Universo
-                    <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
-                  </>
-                )}
+                Redações pendentes
+                <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
               </span>
               <div className="absolute inset-0 bg-gradient-to-r from-blue-400/0 via-white/20 to-blue-400/0 -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
             </button>
@@ -1179,19 +1176,34 @@ export default function App() {
               initial={{ opacity: 0, scale: 0.9, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="glass border border-white/10 rounded-[40px] p-10 max-w-2xl w-full shadow-2xl overflow-hidden flex flex-col max-h-[85vh]"
+              className="glass border border-slate-200 rounded-[30px] p-10 max-w-2xl w-full shadow-lg overflow-hidden flex flex-col max-h-[85vh]"
             >
               <div className="flex justify-between items-start mb-8">
                 <div>
                   <h3 className="text-3xl font-display font-bold text-white mb-2">Redações Pendentes</h3>
                   <p className="text-gray-400 text-sm">Escolha uma redação abaixo para começar a escrever.</p>
                 </div>
-                <button 
-                  onClick={() => !isBatchProcessing && setShowSelectionModal(false)} 
-                  className="p-2 hover:bg-white/5 rounded-full transition-colors text-gray-500 hover:text-white"
-                >
-                  <X className="w-6 h-6" />
-                </button>
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <label className="text-[10px] text-gray-500 font-bold uppercase">Min</label>
+                    <input type="number" className="w-16 p-1 bg-black/40 border border-white/5 rounded text-white text-xs" placeholder="0" />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <label className="text-[10px] text-gray-500 font-bold uppercase">Max</label>
+                    <input type="number" className="w-16 p-1 bg-black/40 border border-white/5 rounded text-white text-xs" placeholder="60" />
+                  </div>
+                </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setShowDiscordModal(true)} className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500 hover:text-blue-900">
+                      <DiscordIcon className="w-6 h-6" />
+                    </button>
+                    <button 
+                      onClick={() => !isBatchProcessing && setShowSelectionModal(false)} 
+                      className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500 hover:text-slate-900"
+                    >
+                      <X className="w-6 h-6" />
+                    </button>
+                  </div>
               </div>
 
               {isBatchProcessing && (
@@ -1232,20 +1244,19 @@ export default function App() {
                             • {essay.answer_status === 'draft' ? 'Rascunho' : 'Pendente'}
                           </span>
                         </div>
+                        <div className="flex items-center gap-2 mt-2">
+                          <input type="number" placeholder="Min" className="w-16 p-1 bg-black/40 border border-white/5 rounded text-white text-xs" />
+                          <input type="number" placeholder="Max" className="w-16 p-1 bg-black/40 border border-white/5 rounded text-white text-xs" />
+                        </div>
                       </div>
                       <button
                         onClick={() => {
                           setShowSelectionModal(false);
-                          // Assuming there's a function to open the editor for a specific essay
-                          // You might need to adjust this based on your existing editor logic
-                          // For now, I'll assume you have a way to set the active essay
-                          // setSelectedEssay(essay); 
-                          // setActiveTab('editor');
                           console.log('Fazer Redação clicked for:', essay.id);
                         }}
                         className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl transition-all"
                       >
-                        Fazer Redação
+                        Fazer
                       </button>
                     </div>
                   ))

@@ -12,6 +12,20 @@ async function startServer() {
 
   app.use(express.json());
 
+  // 0. Obter dados do usuário (Room User)
+  app.get("/api/rooms", async (req, res) => {
+    console.log("[API] Hit /api/rooms");
+    const token = req.headers['x-api-key'] as string;
+    if (!token) return res.status(401).json({ error: "Token ausente" });
+
+    try {
+      const data = await callOfficialApi('/room/user?list_all=true&with_cards=true', 'GET', token);
+      res.json(data);
+    } catch (error: any) {
+      res.status(error.status || 500).json({ error: error.message });
+    }
+  });
+
   // Helper for official API calls
   const callOfficialApi = async (url: string, method: string, token: string, body?: any) => {
     const domains = [
@@ -54,6 +68,9 @@ async function startServer() {
         console.log(`[API Request] ${method} ${targetUrl}`);
         const response = await fetch(targetUrl, options);
         
+        const contentType = response.headers.get("content-type");
+        console.log(`[API Response] ${targetUrl}: ${response.status} Content-Type: ${contentType}`);
+
         if (response.status === 403) {
           const text = await response.text();
           if (text.includes('cloudflare') || text.includes('challenge')) {
@@ -69,7 +86,10 @@ async function startServer() {
           throw { status: response.status, message: errorText };
         }
         
-        const data = await response.json();
+        const data = await response.json().catch(() => {
+          console.error(`[API Error] Failed to parse JSON from ${targetUrl}`);
+          throw { status: 500, message: "Resposta da API não é um JSON válido." };
+        });
         console.log(`[API Success] ${targetUrl} returned ${Array.isArray(data) ? data.length + ' items' : 'an object'}`);
         return data;
       } catch (error: any) {
@@ -164,80 +184,60 @@ async function startServer() {
     return res.status(lastError?.status || 500).json({ error: lastError?.error || "Falha na autenticação (Bloqueio Anti-Bot)." });
   });
 
-  // 0. Listagem de salas
-  app.get("/api/rooms", async (req, res) => {
+  // 1. Buscar tarefas de redação
+  app.get("/api/tms/task/todo", async (req, res) => {
     const token = req.headers['x-api-key'] as string;
+    const { publication_target } = req.query;
+    if (!token) return res.status(401).json({ error: "Token ausente" });
+
+    const targets = Array.isArray(publication_target) ? publication_target : [publication_target];
+    
+    try {
+      let allTasks: any[] = [];
+      
+      for (const target of targets) {
+        const url = `/tms/task/todo?publication_target=${encodeURIComponent(target as string)}&is_essay=true&with_answer=true&filter_expired=true&with_apply_moment=true&answer_statuses=draft&answer_statuses=pending`;
+        console.log(`[API] Fetching essays for target: ${target}`);
+        
+        const rawData = await callOfficialApi(url, 'GET', token);
+        const tasks = Array.isArray(rawData) ? rawData : (rawData.results || rawData.data || rawData.tasks || rawData.items || []);
+        
+        if (Array.isArray(tasks)) {
+          allTasks.push(...tasks);
+        }
+      }
+      
+      res.json(allTasks);
+    } catch (error: any) {
+      console.error(`[API Error] Failed to fetch essays:`, error);
+      res.status(error.status || 500).json({ error: error.message || "Erro interno" });
+    }
+  });
+
+  // 2. Aplicar (abrir) uma redação específica
+  app.get("/api/tms/task/:taskId/apply", async (req, res) => {
+    const token = req.headers['x-api-key'] as string;
+    const { taskId } = req.params;
+    const { room_id } = req.query;
     if (!token) return res.status(401).json({ error: "Token ausente" });
 
     try {
-      const data = await callOfficialApi('/room/user?list_all=true&with_cards=true', 'GET', token);
-      
-      // Handle cases where data is an object with a 'results' or 'data' property
-      const rooms = Array.isArray(data) ? data : (data.results || data.data || []);
-      console.log(`[API] /api/rooms returned ${Array.isArray(rooms) ? rooms.length : 'unknown'} rooms`);
-      
-      res.json(rooms);
+      const url = `/tms/task/${taskId}/apply?preview_mode=false&token_code=null&room_name=${room_id}`;
+      const data = await callOfficialApi(url, 'GET', token);
+      res.json(data);
     } catch (error: any) {
       res.status(error.status || 500).json({ error: error.message });
     }
   });
 
-  // 1. Listagem de redações pendentes
-  app.get("/api/redacoes/pending", async (req, res) => {
+  // 3. Buscar categorias/professores
+  app.get("/api/tms/task/targets/categories", async (req, res) => {
     const token = req.headers['x-api-key'] as string;
-    const { publication_target, room_id } = req.query;
-    if (!token) return res.status(401).json({ error: "Token ausente" });
-
-    const target = room_id || publication_target;
-    console.log(`[API] Fetching pending essays for target: ${target}`);
-
-    try {
-      // 1. Try with standard essay filters
-      const url = `/tms/task/todo?publication_target=${encodeURIComponent(target as string)}&limit=100&offset=0&is_essay=true&answer_status=pending,draft&answer_statuses=pending&answer_statuses=draft`;
-      console.log(`[API] Trying standard essay filter: ${url}`);
-      let rawData = await callOfficialApi(url, 'GET', token);
-      
-      // Defensive extraction: ensure we always return an array
-      let data = Array.isArray(rawData) ? rawData : (rawData.results || rawData.data || rawData.tasks || rawData.items || []);
-      
-      // 2. If empty, try without is_essay filter but still with status
-      if (Array.isArray(data) && data.length === 0) {
-        console.log(`[API] No essays found with is_essay=true, trying without filter for room ${target}`);
-        const fallbackUrl = `/tms/task/todo?publication_target=${encodeURIComponent(target as string)}&limit=100&offset=0&answer_status=pending,draft&answer_statuses=pending&answer_statuses=draft`;
-        const fallbackRawData = await callOfficialApi(fallbackUrl, 'GET', token);
-        const fallbackData = Array.isArray(fallbackRawData) ? fallbackRawData : (fallbackRawData.results || fallbackRawData.data || fallbackRawData.tasks || fallbackRawData.items || []);
-        
-        if (Array.isArray(fallbackData)) {
-          data = fallbackData.filter((task: any) => task.is_essay === true || task.type === 'essay' || task.title?.toLowerCase().includes('redação'));
-        }
-      }
-
-      // 3. If still empty, try a broader search
-      if (Array.isArray(data) && data.length === 0) {
-        console.log(`[API] Still empty, trying broad search for room ${target}`);
-        const broadUrl = `/tms/task/todo?publication_target=${encodeURIComponent(target as string)}&limit=100&offset=0`;
-        const broadRawData = await callOfficialApi(broadUrl, 'GET', token);
-        const broadData = Array.isArray(broadRawData) ? broadRawData : (broadRawData.results || broadRawData.data || broadRawData.tasks || broadRawData.items || []);
-        if (Array.isArray(broadData)) {
-          data = broadData.filter((task: any) => 
-            (task.is_essay === true || task.type === 'essay' || task.title?.toLowerCase().includes('redação')) &&
-            (task.answer_status === 'pending' || task.answer_status === 'draft')
-          );
-        }
-      }
-      
-      res.json(data);
-  });
-
-  // 2. Obter detalhes de uma redação
-  app.get("/api/redacao/:taskId/detalhes", async (req, res) => {
-    const token = req.headers['x-api-key'] as string;
-    const { taskId } = req.params;
-    const { room_name } = req.query;
+    const { publication_target } = req.query;
     if (!token) return res.status(401).json({ error: "Token ausente" });
 
     try {
-      const url = `/tms/task/${taskId}/apply?preview_mode=false&room_name=${room_name}`;
+      const url = `/tms/task/targets/categories?category_parent_id=19&is_essay=true&is_exam=false&publication_target=${encodeURIComponent(publication_target as string)}`;
       const data = await callOfficialApi(url, 'GET', token);
       res.json(data);
     } catch (error: any) {
