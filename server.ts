@@ -110,7 +110,7 @@ async function startServer() {
     throw lastError || new Error("Falha ao conectar às APIs.");
   };
 
-  // 1. Autenticação (Novo Fluxo)
+  // 1. Autenticação (Proxy Robusto)
   app.post("/api/login", async (req, res) => {
     console.log(`[Server] Rota /api/login acessada!`);
     const { user, senha } = req.body;
@@ -120,61 +120,77 @@ async function startServer() {
       return res.status(400).json({ error: "RA e senha são obrigatórios." });
     }
 
-    try {
-      // Passo 1: Login no Salado Futuro
-      console.log(`[Login] Passo 1: Autenticando no Salado Futuro...`);
-      const step1Response = await fetch('https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi/credenciais/api/LoginCompletoToken', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: user, password: senha })
-      });
+    const loginDomains = [
+      'https://edusp-api.ip.tv/registration/edusp',
+      'https://api.educacao.sp.gov.br/registration/edusp',
+      'https://shuziroastralhub.onrender.com/registration/edusp'
+    ];
 
-      if (!step1Response.ok) {
-        const errText = await step1Response.text();
-        console.error(`[Login] Erro Passo 1: ${step1Response.status} - ${errText}`);
-        return res.status(step1Response.status).json({ error: "Falha na autenticação (Passo 1)." });
+    console.log(`[Login] Iniciando tentativa de login com ${loginDomains.length} domínios.`);
+    let lastError: any = null;
+
+    for (const url of loginDomains) {
+      try {
+        const domain = new URL(url).origin;
+        console.log(`[Login Request] Iniciando fetch para: ${url}`);
+        
+        const loginResponse = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'accept': 'application/json, text/plain, */*',
+            'accept-language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+            'content-type': 'application/json',
+            'connection': 'keep-alive', // Ajuda a evitar 502
+            'sec-ch-ua': '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'origin': domain,
+            'referer': `${domain}/`,
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+            'x-api-platform': 'webclient',
+            'x-api-realm': 'edusp'
+          },
+          body: JSON.stringify({
+            realm: 'edusp',
+            platform: 'webclient',
+            id: user,
+            password: senha
+          }),
+          signal: AbortSignal.timeout(25000) // Aumentado para 25s
+        });
+
+        if (loginResponse.status === 403) {
+          console.warn(`[Login 403] Bloqueio detectado em ${url}`);
+          lastError = { status: 403, error: `Acesso bloqueado pela proteção anti-bot em ${url}.` };
+          continue;
+        }
+
+        if (!loginResponse.ok) {
+          const errorText = await loginResponse.text();
+          console.warn(`[Login Attempt Failed] ${url}: ${loginResponse.status} - Body: ${errorText}`);
+          lastError = { status: loginResponse.status, error: loginResponse.status === 401 ? "RA ou Senha incorretos." : `Erro na plataforma oficial (${url}): ${loginResponse.status}` };
+          if (loginResponse.status === 401) break;
+          continue;
+        }
+
+        const authData: any = await loginResponse.json();
+        if (authData.auth_token) {
+          console.log(`[Login Success] ${user}`);
+          return res.json({ 
+            success: true, 
+            auth_token: authData.auth_token,
+            nick: authData.nick || user
+          });
+        }
+      } catch (error: any) {
+        const errorMsg = error.name === 'AbortError' ? 'Tempo limite de conexão excedido.' : (error.message || error);
+        console.warn(`[Login Attempt Failed] ${url}:`, errorMsg);
+        lastError = { status: 502, error: `Erro de conexão (Proxy) com a API (${url}): ${errorMsg}` };
+        await new Promise(r => setTimeout(r, 1000));
       }
-
-      const step1Data = await step1Response.json();
-      console.log(`[Login] Passo 1 Sucesso. Dados recebidos.`);
-      
-      // Assumindo que o token está em step1Data.token ou similar
-      const tokenFromStep1 = step1Data.token || step1Data.access_token; 
-
-      // Passo 2: Obter Token da Edusp
-      console.log(`[Login] Passo 2: Obtendo token da Edusp...`);
-      const step2Response = await fetch('https://edusp-api.ip.tv/registration/edusp/token', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${tokenFromStep1}`
-        },
-        body: JSON.stringify({
-          realm: 'edusp',
-          platform: 'webclient',
-          id: user
-        })
-      });
-
-      if (!step2Response.ok) {
-        const errText = await step2Response.text();
-        console.error(`[Login] Erro Passo 2: ${step2Response.status} - ${errText}`);
-        return res.status(step2Response.status).json({ error: "Falha na autenticação (Passo 2)." });
-      }
-
-      const step2Data = await step2Response.json();
-      console.log(`[Login] Sucesso total!`);
-
-      return res.json({ 
-        success: true, 
-        auth_token: step2Data.auth_token,
-        nick: step2Data.nick || user
-      });
-
-    } catch (error: any) {
-      console.error(`[Login] Erro crítico:`, error);
-      return res.status(500).json({ error: `Erro interno no login: ${error.message}` });
     }
+
+    return res.status(lastError?.status || 502).json({ error: lastError?.error || "Falha na autenticação (Bloqueio Anti-Bot ou Servidor Indisponível)." });
   });
 
   // 1. Buscar tarefas de redação
