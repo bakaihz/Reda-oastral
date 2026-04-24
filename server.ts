@@ -2,6 +2,14 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
+import https from "https";
+import { OpenRouter } from "@openrouter/sdk";
+
+// -- Imports do Bypass Antibot --
+import { fetch as undiciFetch, Agent } from "undici";
+import { CookieJar } from "tough-cookie";
+import { JSDOM } from "jsdom";
+import got from "got";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,6 +34,7 @@ async function startServer() {
 
     try {
       const data = await callOfficialApi('/room/user?list_all=true&with_cards=true', 'GET', token);
+      console.log(`[API /rooms] First room object preview:`, JSON.stringify(Array.isArray(data) ? data[0] : (data.rooms ? data.rooms[0] : data)).substring(0, 150));
       res.json(data);
     } catch (error: any) {
       res.status(error.status || 500).json({ error: error.message });
@@ -36,8 +45,7 @@ async function startServer() {
   const callOfficialApi = async (url: string, method: string, token: string, body?: any) => {
     const domains = [
       'https://edusp-api.ip.tv',
-      'https://api.educacao.sp.gov.br',
-      'https://shuziroastralhub.onrender.com'
+      'https://api.educacao.sp.gov.br'
     ];
     
     let lastError: any = null;
@@ -89,6 +97,9 @@ async function startServer() {
         if (!response.ok) {
           const errorText = await response.text();
           console.error(`[API Error Response] ${targetUrl}: ${response.status}`, errorText);
+          if (response.status === 401 || response.status === 403 || response.status === 400) {
+            throw { status: response.status, message: errorText, isAuthError: true };
+          }
           throw { status: response.status, message: errorText };
         }
         
@@ -99,6 +110,9 @@ async function startServer() {
         console.log(`[API Success] ${targetUrl} returned ${Array.isArray(data) ? data.length + ' items' : 'an object'}`);
         return data;
       } catch (error: any) {
+        if (error.isAuthError) {
+          throw error; // instantly fail, don't try other domains
+        }
         const errorMsg = error.name === 'AbortError' ? 'Tempo limite de conexão excedido.' : (error.message || error);
         console.warn(`[API Attempt Failed] ${targetUrl}: ${errorMsg}`); // Changed to warn
         lastError = { status: 500, message: `Erro ao conectar ao domínio ${domain}: ${errorMsg}` };
@@ -110,9 +124,9 @@ async function startServer() {
     throw lastError || new Error("Falha ao conectar às APIs.");
   };
 
-  // 1. Autenticação (Proxy Robusto)
+  // 1. Autenticação (Proxy Bypass JSDOM + Got)
   app.post("/api/login", async (req, res) => {
-    console.log(`[Server] Rota /api/login acessada!`);
+    console.log(`[Server] Rota /api/login acessada! Iniciando Bypass...`);
     const { user, senha } = req.body;
     console.log(`[Login] Tentativa para: ${user}`);
 
@@ -120,103 +134,181 @@ async function startServer() {
       return res.status(400).json({ error: "RA e senha são obrigatórios." });
     }
 
-    const loginDomains = [
-      'https://edusp-api.ip.tv/registration/edusp',
-      'https://api.educacao.sp.gov.br/registration/edusp',
-      'https://shuziroastralhub.onrender.com/registration/edusp'
-    ];
+    try {
+      // Cria instâncias limpas por requisição para evitar vazamento de sessão entre alunos
+      const cookieJar = new CookieJar();
+      const agent = new Agent({
+        keepAliveTimeout: 60_000,
+        keepAliveMaxTimeout: 60_000
+      });
 
-    console.log(`[Login] Iniciando tentativa de login com ${loginDomains.length} domínios.`);
-    let lastError: any = null;
+      const fetchWithCookies = async (url: string | URL, options: any = {}) => {
+        const urlStr = url.toString();
+        const cookieString = await cookieJar.getCookieString(urlStr);
 
-    for (const url of loginDomains) {
-      try {
-        const domain = new URL(url).origin;
-        console.log(`[Login Request] Iniciando fetch para: ${url}`);
-        
-        const loginResponse = await fetch(url, {
-          method: 'POST',
+        const res = await undiciFetch(urlStr, {
+          ...options,
           headers: {
-            'accept': 'application/json, text/plain, */*',
-            'accept-language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-            'content-type': 'application/json',
-            'connection': 'keep-alive', // Ajuda a evitar 502
-            'sec-ch-ua': '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-            'origin': domain,
-            'referer': `${domain}/`,
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
-            'x-api-platform': 'webclient',
-            'x-api-realm': 'edusp'
+            ...(options.headers || {}),
+            cookie: cookieString
           },
-          body: JSON.stringify({
-            realm: 'edusp',
-            platform: 'webclient',
-            id: user,
-            password: senha
-          }),
-          signal: AbortSignal.timeout(25000) // Aumentado para 25s
+          dispatcher: agent
         });
 
-        if (loginResponse.status === 403) {
-          console.warn(`[Login 403] Bloqueio detectado em ${url}`);
-          lastError = { status: 403, error: `Acesso bloqueado pela proteção anti-bot em ${url}.` };
-          continue;
+        // O pacote undici retorna arrays de set-cookie
+        // Usa interface Headers do DOM real para obter.
+        const setCookies = res.headers.getSetCookie ? res.headers.getSetCookie() : [];
+        for (const setCookie of setCookies) {
+          await cookieJar.setCookie(setCookie, urlStr);
         }
 
-        if (!loginResponse.ok) {
-          const errorText = await loginResponse.text();
-          console.warn(`[Login Attempt Failed] ${url}: ${loginResponse.status} - Body: ${errorText}`);
-          lastError = { status: loginResponse.status, error: loginResponse.status === 401 ? "RA ou Senha incorretos." : `Erro na plataforma oficial (${url}): ${loginResponse.status}` };
-          if (loginResponse.status === 401) break;
-          continue;
-        }
+        return res;
+      };
 
-        const authData: any = await loginResponse.json();
-        if (authData.auth_token) {
-          console.log(`[Login Success] ${user}`);
-          return res.json({ 
-            success: true, 
-            auth_token: authData.auth_token,
-            nick: authData.nick || user
-          });
+      // ==== PASSO 1: Obter Token Inicial do Salado Futuro ====
+      console.log(`[Login] Passo 1: Autenticando com Token Completo...`);
+      const step1Response = await undiciFetch(
+        "https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi/credenciais/api/LoginCompletoToken",
+        {
+          method: "POST",
+          headers: {
+            "accept": "application/json, text/plain, */*",
+            "content-type": "application/json",
+            "ocp-apim-subscription-key": "d701a2043aa24d7ebb37e9adf60d043b", // Usando a chave exata do seu script
+            "referer": "https://saladofuturo.educacao.sp.gov.br/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+          },
+          body: JSON.stringify({
+            user: user,
+            senha: senha
+          }),
+          dispatcher: agent
         }
-      } catch (error: any) {
-        const errorMsg = error.name === 'AbortError' ? 'Tempo limite de conexão excedido.' : (error.message || error);
-        console.warn(`[Login Attempt Failed] ${url}:`, errorMsg);
-        lastError = { status: 502, error: `Erro de conexão (Proxy) com a API (${url}): ${errorMsg}` };
-        await new Promise(r => setTimeout(r, 1000));
+      );
+
+      if (!step1Response.ok) {
+        const text = await step1Response.text();
+        console.error(`[Login Erro Passo 1] (${step1Response.status}): ${text}`);
+        
+        let errorMsg = `RA ou Senha incorretos ou Bloqueio. (${step1Response.status})`;
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed.statusRetorno) {
+            errorMsg = parsed.statusRetorno;
+          }
+        } catch(e) {}
+
+        return res.status(step1Response.status === 401 ? 401 : step1Response.status).json({ 
+          error: errorMsg
+        });
       }
-    }
 
-    return res.status(lastError?.status || 502).json({ error: lastError?.error || "Falha na autenticação (Bloqueio Anti-Bot ou Servidor Indisponível)." });
+      const loginData = await step1Response.json() as any;
+      const initialToken = loginData.token || loginData.access_token;
+      console.log(`[Login] Passo 1 concluído, token inicial capturado.`);
+
+      // ==== PASSO 2: Simular Navegador com JSDOM e Got ====
+      console.log(`[Login] Passo 2: Inicializando simulador AntiBot (JSDOM)...`);
+      const gotResponse = await got("https://saladofuturo.educacao.sp.gov.br/login", {
+        throwHttpErrors: false,
+        http2: false,
+        headers: {
+          "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+          "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+          "accept-language": "pt-BR,pt;q=0.9,en-US;q=0.8",
+          "accept-encoding": "gzip, deflate, br",
+          "referer": "https://saladofuturo.educacao.sp.gov.br/",
+          "sec-ch-ua": '"Chromium";v="144", "Google Chrome";v="144", "Not(A:Brand";v="99"',
+          "sec-ch-ua-mobile": "?0",
+          "sec-ch-ua-platform": '"Windows"',
+          "upgrade-insecure-requests": "1",
+          "connection": "keep-alive",
+          "pragma": "no-cache",
+          "cache-control": "no-cache"
+        }
+      });
+
+      // Capturando os cookies iniciais recebidos no HTML da página de proteção
+      const cookiesHeaders = gotResponse.headers['set-cookie'];
+      if (cookiesHeaders) {
+         for (const cook of cookiesHeaders) {
+            await cookieJar.setCookie(cook, "https://saladofuturo.educacao.sp.gov.br/");
+            await cookieJar.setCookie(cook, "https://edusp-api.ip.tv/");
+         }
+      }
+
+      const dom = new JSDOM(gotResponse.body as string, {
+        url: "https://saladofuturo.educacao.sp.gov.br/",
+        runScripts: "outside-only",
+        pretendToBeVisual: true
+      });
+
+      const win: any = dom.window;
+      win.fetch = fetchWithCookies; // Injeta o fetch protegido por cookies!
+
+      console.log(`[Login] Passo 3: Obtendo auth_token oficial da Edusp...`);
+      const vsfApi = await win.fetch("https://edusp-api.ip.tv/registration/edusp/token", {
+        method: "POST",
+        headers: {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "request-id": "|625bd2809ec74cc5bf522f4837291586.34b5d944b713472b",
+          "sec-ch-ua": "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"Google Chrome\";v=\"144\"",
+          "sec-ch-ua-mobile": "?0",
+          "sec-ch-ua-platform": "\"Windows\"",
+          "traceparent": "00-625bd2809ec74cc5bf522f4837291586-34b5d944b713472b-01",
+          "x-api-platform": "webclient",
+          "x-api-realm": "edusp",
+          "user-agent": dom.window.navigator.userAgent
+        },
+        body: JSON.stringify({
+          token: initialToken
+        })
+      });
+
+      if (!vsfApi.ok) {
+        const text = await vsfApi.text();
+        console.error(`[Login] Erro ao obter Token Edusp: ${vsfApi.status} - ${text}`);
+         return res.status(vsfApi.status).json({ error: "Falha na conversão do token da Edusp." });
+      }
+
+      const step2Data = await vsfApi.json();
+      console.log(`[Login] Operação Phantom Proxy finalizada com Sucesso!`);
+
+      return res.json({ 
+        success: true, 
+        auth_token: step2Data.auth_token,
+        nick: step2Data.nick || user
+      });
+
+    } catch (error: any) {
+      console.error(`[Login] Erro crítico no bypass:`, error);
+      return res.status(500).json({ error: `Erro interno no login: ${error.message}` });
+    }
   });
 
   // 1. Buscar tarefas de redação
   app.get("/api/tms/task/todo", async (req, res) => {
     const token = req.headers['x-api-key'] as string;
-    const { publication_target } = req.query;
     if (!token) return res.status(401).json({ error: "Token ausente" });
 
-    const targets = Array.isArray(publication_target) ? publication_target : [publication_target];
-    
     try {
-      let allTasks: any[] = [];
+      // Repassar exatamente a string de query que o frontend montou
+      const queryString = req.url.split('?')[1] || '';
       
-      for (const target of targets) {
-        const url = `/tms/task/todo?publication_target=${encodeURIComponent(target as string)}&is_essay=true&with_answer=true&filter_expired=true&with_apply_moment=true&answer_statuses=draft&answer_statuses=pending`;
-        console.log(`[API] Fetching essays for target: ${target}`);
-        
-        const rawData = await callOfficialApi(url, 'GET', token);
-        const tasks = Array.isArray(rawData) ? rawData : (rawData.results || rawData.data || rawData.tasks || rawData.items || []);
-        
-        if (Array.isArray(tasks)) {
-          allTasks.push(...tasks);
-        }
+      const officialUrl = `/tms/task/todo?expired_only=false&limit=100&offset=0&filter_expired=true&is_exam=false&with_answer=true&is_essay=true&answer_statuses=draft&answer_statuses=pending&with_apply_moment=true&${queryString}`;
+      console.log(`[API] Fetching essays with mega-query...`);
+      
+      const rawData = await callOfficialApi(officialUrl, 'GET', token);
+      const tasks = Array.isArray(rawData) ? rawData : (rawData.results || rawData.data || rawData.tasks || rawData.items || []);
+      
+      console.log(`[API /todo] Returned ${tasks.length ? tasks.length : 0} tasks total.`);
+      
+      if (Array.isArray(tasks) && tasks.length === 0) {
+         console.log(`[API /todo] WARNING! zero tasks for this mega query. Confirme se há redações pendentes.`);
       }
-      
-      res.json(allTasks);
+
+      res.json(tasks);
     } catch (error: any) {
       console.error(`[API Error] Failed to fetch essays:`, error);
       res.status(error.status || 500).json({ error: error.message || "Erro interno" });
@@ -261,35 +353,50 @@ async function startServer() {
     if (!contexto) return res.status(400).json({ error: "Contexto ausente" });
 
     try {
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY || "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"}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: "google/gemma-4-31b-it",
+      const apiKey = "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";
+      console.log(`[OpenRouter] Call starting. Key: ${apiKey.substring(0, 10)}...`);
+
+      const openrouter = new OpenRouter({
+        apiKey: apiKey
+      });
+
+      const response = await openrouter.chat.send({
+        chatRequest: {
+          model: "google/gemini-2.5-flash",
           messages: [
             {
               role: "user",
               content: `Você é um especialista em redação escolar. Escreva uma redação de alta qualidade.
-              Gênero: ${genero || "Dissertativo-argumentativo"}
-              Contexto/Tema: ${contexto}
-              
-              Responda EXCLUSIVAMENTE em formato JSON com as chaves "titulo" e "texto".`
+            Gênero: ${genero || "Dissertativo-argumentativo"}
+            Contexto/Tema: ${contexto}
+            
+            Responda EXCLUSIVAMENTE em formato JSON com as chaves "titulo" e "texto". Não inclua markdown como \`\`\`json ou qualquer outro texto.`
             }
-          ],
-          response_format: { type: "json_object" }
-        })
+          ]
+        }
       });
 
-      const data: any = await response.json();
-      const content = data.choices[0]?.message?.content;
-      const result = JSON.parse(content || "{}");
+      if (!response.choices || response.choices.length === 0) {
+        throw new Error("Nenhuma resposta da IA recebida.");
+      }
+
+      const content = response.choices[0]?.message?.content;
+      if (!content) {
+        throw new Error("Conteúdo vazio da IA.");
+      }
+
+      let result;
+      try {
+        result = JSON.parse(content.replace(/```json/g, '').replace(/```/g, '').trim());
+      } catch (e) {
+        console.error("[JSON Parse Error] Content:", content);
+        throw new Error("Falha ao formatar resposta da IA.");
+      }
+      
       res.json(result);
     } catch (error: any) {
-      console.error("OpenRouter Error:", error);
-      res.status(500).json({ error: "Erro na geração por IA" });
+      console.error("OpenRouter Error:", error.message || error);
+      res.status(500).json({ error: error.message });
     }
   });
 
@@ -300,16 +407,21 @@ async function startServer() {
 
     try {
       const url = `/tms/task/${task_id}/answer`;
-      const payload = {
+      
+      const payload: any = {
         room_for_apply: room_name,
-        answers: [
-          {
-            question_id,
-            essay_title: titulo,
-            essay_text: texto
+        accessed_on: "room",
+        executed_on: "00:05:00",
+        answers: {
+          [String(question_id)]: {
+            question_id: question_id,
+            question_type: "essay",
+            title: titulo, // Try 'title' instead of 'essay_title'
+            text: texto // Try 'text' instead of 'essay_text'
           }
-        ]
+        }
       };
+      
       const data = await callOfficialApi(url, 'POST', token_usuario, payload);
       res.json({ success: true, data });
     } catch (error: any) {
@@ -324,20 +436,24 @@ async function startServer() {
 
     try {
       const url = `/tms/task/${task_id}/answer`;
+      const qIdStr = String(question_id);
+      
       const payload: any = {
         room_for_apply: room_for_apply,
-        answers: [
-          {
-            question_id,
-            essay_title: titulo,
-            essay_text: texto
+        accessed_on: "room",
+        executed_on: "00:05:00",
+        answers: {
+          [qIdStr]: {
+            question_id: parseInt(qIdStr),
+            question_type: "essay",
+            title: titulo, // Try 'title' instead of 'essay_title'
+            text: texto // Try 'text' instead of 'essay_text'
           }
-        ]
+        }
       };
       
-      // If answer_id exists, it's an update
       if (answer_id) {
-        payload.answers[0].answer_id = answer_id;
+        payload.answers[qIdStr].answer_id = answer_id;
       }
 
       const data = await callOfficialApi(url, 'POST', auth_token, payload);

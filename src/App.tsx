@@ -138,6 +138,10 @@ export default function App() {
       const response = await fetch('/api/rooms', {
         headers: { 'x-api-key': authToken }
       });
+      if (response.status === 401 || response.status === 403) {
+        handleLogout();
+        return [];
+      }
       const text = await response.text();
       let data;
       try {
@@ -146,7 +150,7 @@ export default function App() {
         console.error('Error parsing JSON:', text);
         return [];
       }
-      const roomsArray = Array.isArray(data) ? data : (data.results || data.data || []);
+      const roomsArray = Array.isArray(data) ? data : (data.rooms || data.results || data.data || []);
       
       if (Array.isArray(roomsArray)) {
         setRooms(roomsArray);
@@ -170,54 +174,85 @@ export default function App() {
     try {
       // 1. Get all rooms
       const allRooms = await fetchRooms();
-      const allAggregated: any[] = [];
+      let allAggregated: any[] = [];
 
       if (allRooms.length === 0) {
         console.warn('[Frontend] No rooms found.');
       }
 
-      // 2. For each room, fetch pending/draft essays
+      // 2. Coletar todos os 'publication_targets' possíveis
+      const allTargets: string[] = [];
+      const roomMap: Record<string, any> = {};
+
       for (const room of allRooms) {
-        if (!room || !room.name) continue;
-        console.log(`[Frontend] Fetching essays for room: ${room.name}`);
+        if (!room) continue;
         
-        try {
-          // Try with room name first
-          let response = await fetch(`/api/tms/task/todo?publication_target=${encodeURIComponent(room.name)}`, {
-            headers: { 'x-api-key': authToken }
-          });
-          let data = await response.json();
-          let essaysArray = Array.isArray(data) ? data : (data.results || data.data || []);
-          
-          // If empty, try with room ID as publication_target
-          if (essaysArray.length === 0 && room.id) {
-            console.log(`[Frontend] Room ${room.name} returned empty, trying with ID: ${room.id}`);
-            response = await fetch(`/api/tms/task/todo?publication_target=${encodeURIComponent(room.id)}`, {
-              headers: { 'x-api-key': authToken }
-            });
-            data = await response.json();
-            // Robust extraction
-            essaysArray = Array.isArray(data) ? data : (data.results || data.data || data.tasks || data.items || []);
-          }
-          
-          console.log(`[Frontend] Room ${room.name} returned ${essaysArray.length} essays`);
-          
-          if (Array.isArray(essaysArray) && essaysArray.length > 0) {
-            // Add room info to each essay
-            const essaysWithRoom = essaysArray.map(e => ({
-              ...e,
-              publication_target: room.name,
-              room_id: room.id
-            }));
-            allAggregated.push(...essaysWithRoom);
-          } else {
-            console.warn(`[Frontend] Room ${room.name} returned no essays or invalid format:`, data);
-          }
-        } catch (err) {
-          console.error(`Error fetching essays for room ${room.name}:`, err);
-          // Show error in UI
-          setMessage({ type: 'error', text: `Erro ao buscar redações na sala ${room.name}.` });
+        if (room.name) {
+           allTargets.push(room.name);
+           // Also add combination if userNick is available (e.g., roomname:userid)
+           if (userNick) {
+             const userSlug = userNick.replace(/\s+/g, '').toLowerCase();
+             const finalSlug = userSlug.endsWith('sp') ? userSlug : userSlug + '-sp';
+             allTargets.push(`${room.name}:${finalSlug}`);
+           }
+           roomMap[room.name] = room;
         }
+        if (room.id) {
+           allTargets.push(room.id.toString());
+           roomMap[room.id.toString()] = room;
+        }
+
+        // Adicionar subjects/disciplinas se existirem
+        if (room.subjects && Array.isArray(room.subjects)) {
+           room.subjects.forEach((sub: any) => {
+              if (sub.id) allTargets.push(sub.id.toString());
+           });
+        }
+        
+        // NOVO: Adicionando IDs das `group_categories` baseados no JSON oficial
+        if (room.group_categories && Array.isArray(room.group_categories)) {
+           room.group_categories.forEach((cat: any) => {
+              if (cat.id) {
+                allTargets.push(cat.id.toString());
+                roomMap[cat.id.toString()] = cat;
+              }
+           });
+        }
+      }
+
+      // 3. Fazer requisição única otimizada passando todos os targets no estilo da API oficial
+      console.log(`[Frontend] Fetching essays for ${allTargets.length} extracted targets...`);
+      
+      const queryParams = new URLSearchParams();
+      allTargets.forEach(target => queryParams.append('publication_target', target));
+
+      const response = await fetch(`/api/tms/task/todo?${queryParams.toString()}`, {
+        headers: { 'x-api-key': authToken }
+      });
+      if (response.status === 401 || response.status === 403) {
+        handleLogout();
+        return;
+      }
+      const data = await response.json();
+      let essaysArray = Array.isArray(data) ? data : (data.results || data.data || data.tasks || data.items || []);
+      
+      console.log(`[Frontend] Master fetch returned ${essaysArray.length} total essays`);
+
+      if (Array.isArray(essaysArray) && essaysArray.length > 0) {
+        // Find best room match for each essay
+        const essaysWithRoom = essaysArray.map(e => {
+           let matchedRoom = null;
+           if (e.publication_target) {
+              const baseTarget = e.publication_target.split(':')[0];
+              matchedRoom = roomMap[baseTarget] || roomMap[e.publication_target];
+           }
+           return {
+             ...e,
+             roomName: matchedRoom ? matchedRoom.name : (e.publication_target || 'N/A'),
+             roomId: matchedRoom ? matchedRoom.id : null
+           };
+        });
+        allAggregated = essaysWithRoom;
       }
 
       setAggregatedEssays(allAggregated);
@@ -243,25 +278,45 @@ export default function App() {
     setIsFetchingData(true);
 
     try {
-      // Try with room name first
-      let response = await fetch(`/api/tms/task/todo?publication_target=${encodeURIComponent(roomName)}`, {
-        headers: { 'x-api-key': authToken }
-      });
-      let data = await response.json();
-      let essaysArray = Array.isArray(data) ? data : (data.results || data.data || []);
+      // Usaremos a super-query de qualquer forma para não perder tarefas
+      const room = rooms.find(r => r.name === roomName) || rooms[0];
+      const allTargets: string[] = [];
       
-      // If empty, try to find the room ID and try with it
-      if (essaysArray.length === 0) {
-        const room = rooms.find(r => r.name === roomName);
-        if (room && room.id) {
-          console.log(`[Frontend] Single room ${roomName} returned empty, trying with ID: ${room.id}`);
-          response = await fetch(`/api/tms/task/todo?publication_target=${encodeURIComponent(room.id)}`, {
-            headers: { 'x-api-key': authToken }
-          });
-          data = await response.json();
-          essaysArray = Array.isArray(data) ? data : (data.results || data.data || []);
+      const allRoomsToScan = rooms; // Vamos varrer todas as salas para garantir
+      
+      for (const r of allRoomsToScan) {
+        if (!r) continue;
+        if (r.name) {
+           allTargets.push(r.name);
+           if (userNick) {
+             const userSlug = userNick.replace(/\s+/g, '').toLowerCase();
+             const finalSlug = userSlug.endsWith('sp') ? userSlug : userSlug + '-sp';
+             allTargets.push(`${r.name}:${finalSlug}`);
+           }
+        }
+        if (r.id) allTargets.push(r.id.toString());
+        if (r.subjects && Array.isArray(r.subjects)) r.subjects.forEach((s: any) => s.id && allTargets.push(s.id.toString()));
+        if (r.group_categories && Array.isArray(r.group_categories)) {
+           r.group_categories.forEach((cat: any) => {
+              if (cat.id) allTargets.push(cat.id.toString());
+           });
         }
       }
+
+      console.log(`[Frontend] FetchEssays mega-query with ${allTargets.length} targets...`);
+      const queryParams = new URLSearchParams();
+      // Remover duplicatas
+      Array.from(new Set(allTargets)).forEach(target => queryParams.append('publication_target', target));
+
+      const response = await fetch(`/api/tms/task/todo?${queryParams.toString()}`, {
+        headers: { 'x-api-key': authToken }
+      });
+      if (response.status === 401 || response.status === 403) {
+        handleLogout();
+        return;
+      }
+      const data = await response.json();
+      let essaysArray = Array.isArray(data) ? data : (data.results || data.data || data.tasks || data.items || []);
       
       if (Array.isArray(essaysArray)) {
         setEssays(essaysArray);
@@ -275,13 +330,24 @@ export default function App() {
 
   const stripHtml = (html: string) => {
     if (!html) return '';
+    let text = html.replace(/<\/(p|div|h[1-6]|li)>/gi, '\n').replace(/<br\s*\/?>/gi, '\n');
     // Replace images with [IMAGEM]
-    let text = html.replace(/<img[^>]*>/gi, ' [IMAGEM] ');
+    text = text.replace(/<img[^>]*>/gi, ' [IMAGEM] ');
     // Remove all other tags
     text = text.replace(/<[^>]*>/g, '');
     // Decode entities (basic)
     text = text.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
     return text.trim();
+  };
+
+  const getEssayContext = (details: any) => {
+    if (!details) return '';
+    const q = details.questions?.[0];
+    const support = q?.options?.support_text || '';
+    const statement = q?.statement || '';
+    const desc = details.description || '';
+    const legacy = details.essay_motivation_texts?.map((t: any, idx: number) => `TEXTO ${idx + 1}: ${stripHtml(t.text)}`).join('\n') || '';
+    return `INSTRUÇÕES/GERAL:\n${stripHtml(support)}\n\nCOLETÂNEA/ENUNCIADO:\n${stripHtml(statement)}\n\nDESCRIÇÃO:\n${stripHtml(desc)}\n\n${legacy}`.trim();
   };
 
   const handleBatchProcess = async () => {
@@ -301,9 +367,10 @@ export default function App() {
       setBatchStatus(prev => ({ ...prev, [essay.id]: 'processing' }));
       
       try {
-        const detailsRes = await fetch(`/api/redacao/${essay.id}/detalhes?room_name=${encodeURIComponent(essay.publication_target)}`, {
+        const detailsRes = await fetch(`/api/tms/task/${essay.id}/apply?room_id=${encodeURIComponent(essay.publication_target)}`, {
           headers: { 'x-api-key': authToken }
         });
+        if (!detailsRes.ok) throw new Error(`Fetch failed: ${detailsRes.status}`);
         const details = await detailsRes.json();
         console.log(`[Batch] Details for task ${essay.id}:`, JSON.stringify(details).substring(0, 500));
 
@@ -314,37 +381,15 @@ export default function App() {
             continue;
         }
 
-        // 2. Build Prompt (stripHtml and format)
-        const enunciado = stripHtml(question.statement || '');
-        const supportTextHtml = question.options?.support_text || '';
-        
-        // Helper to format support texts
-        const formatSupportTexts = (html: string) => {
-            // This is a simplified parser. It assumes sections are separated by <strong>TEXTO I</strong>, etc.
-            const sections = html.split(/(?=<strong>TEXTO\s+[IVX]+<\/strong>)/i);
-            
-            return sections.map(section => {
-                const titleMatch = section.match(/<strong>(TEXTO\s+[IVX]+)<\/strong>/i);
-                if (!titleMatch) return null; // Ignore sections without title
-                
-                const title = titleMatch[1];
-                const content = stripHtml(section.replace(titleMatch[0], ''));
-                
-                if (!content && !section.includes('<img')) return null;
-                
-                return `${title}: ${section.includes('<img') ? '[IMAGEM]' : content}`;
-            }).filter(s => s !== null).join('\n\n');
-        };
-
-        const motivadores = formatSupportTexts(supportTextHtml);
-        const prompt = `ENUNCIADO: ${enunciado}\n\n${motivadores}`;
+        // 2. Build Prompt
+        const prompt = getEssayContext(details);
 
         // 3. Generate AI
         const aiRes = await fetch('/api/gerar', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ 
-            genero: question.options?.genre?.statement || "Dissertativo-argumentativo",
+            genero: question?.options?.genre?.statement || "Dissertativo-argumentativo",
             contexto: prompt
           })
         });
@@ -408,9 +453,13 @@ export default function App() {
     setSelectedEssay(essay);
     setIsFetchingDetails(true);
     try {
-      const response = await fetch(`/api/redacao/${essay.id}/detalhes?room_name=${encodeURIComponent(selectedRoom)}`, {
+      const roomParam = essay.roomName || selectedRoom;
+      const response = await fetch(`/api/tms/task/${essay.id}/apply?room_id=${encodeURIComponent(roomParam)}`, {
         headers: { 'x-api-key': authToken }
       });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch: ${response.status} ${response.statusText}`);
+      }
       const data = await response.json();
       setEssayDetails(data);
     } catch (error) {
@@ -420,33 +469,66 @@ export default function App() {
     }
   };
 
-  const handleGenerateEssay = async () => {
-    if (!essayDetails) return;
+  const handleAutoGenerateAndSaveDraft = async () => {
+    if (!essayDetails || !selectedEssay) return;
     setIsGenerating(true);
     try {
-      const enunciado = stripHtml(essayDetails.description || '');
-      const motivadores = essayDetails.essay_motivation_texts?.map((t: any, idx: number) => `TEXTO ${idx + 1}: ${stripHtml(t.text)}`).join('\n') || '';
-      const prompt = `ENUNCIADO: ${enunciado}\n\n${motivadores}`;
+      setMessage({ type: 'success', text: 'Iniciando manifesto IA...' });
+      
+      const prompt = getEssayContext(essayDetails);
+      const generoStr = essayDetails.questions?.[0]?.options?.genre?.statement || essayDetails.essay_genre_name || "Dissertativo-argumentativo";
 
       const response = await fetch('/api/gerar', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          genero: essayDetails.essay_genre_name,
+          genero: generoStr,
           contexto: prompt
         })
       });
       const data = await response.json();
       setGeneratedEssay(data);
+
+      const saveResponse = await fetch('/api/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          task_id: selectedEssay.id,
+          question_id: essayDetails.questions?.[0]?.id,
+          room_for_apply: selectedRoom,
+          auth_token: authToken,
+          titulo: data.titulo,
+          texto: data.texto,
+          answer_id: selectedEssay.answer?.id || selectedEssay.answer_id,
+          apply_moment: selectedEssay.answer?.accessed_on || selectedEssay.apply_moment
+        })
+      });
+      const saveData = await saveResponse.json();
+      
+      if (saveData.success) {
+        setMessage({ type: 'success', text: 'Suas redações já foram salvas em rascunho' });
+        setTimeout(() => {
+          setSelectedEssay(null);
+          setGeneratedEssay(null);
+          setEssayDetails(null);
+          fetchEssays(selectedRoom);
+        }, 3000);
+      } else {
+        setMessage({ type: 'error', text: saveData.error || 'Erro ao salvar rascunho.' });
+      }
     } catch (error) {
-      console.error('Error generating essay:', error);
+      console.error('Error auto-generating and saving:', error);
+      setMessage({ type: 'error', text: 'Erro ao processar a requisição.' });
     } finally {
       setIsGenerating(false);
     }
   };
 
-  const handleSaveDraft = async () => {
-    if (!selectedEssay || !essayDetails || !generatedEssay) return;
+  const handleFinalize = async () => {
+    if (!selectedEssay || !essayDetails || !generatedEssay?.texto) {
+        setMessage({ type: 'error', text: 'Nenhuma redação para finalizar. Gere ou escreva primeiro.' });
+        return;
+    }
     setIsLoading(true);
     try {
       const response = await fetch('/api/complete', {
@@ -464,7 +546,7 @@ export default function App() {
       });
       const data = await response.json();
       if (data.success) {
-        setMessage({ type: 'success', text: 'Rascunho salvo com sucesso!' });
+        setMessage({ type: 'success', text: 'Redação finalizada com sucesso!' });
         setTimeout(() => {
           setSelectedEssay(null);
           setGeneratedEssay(null);
@@ -472,10 +554,10 @@ export default function App() {
           fetchEssays(selectedRoom);
         }, 2000);
       } else {
-        setMessage({ type: 'error', text: data.error || 'Erro ao salvar rascunho.' });
+        setMessage({ type: 'error', text: data.error || 'Erro ao finalizar.' });
       }
     } catch (error) {
-      console.error('Error saving draft:', error);
+      console.error('Error finalizing essay:', error);
       setMessage({ type: 'error', text: 'Erro ao conectar ao servidor.' });
     } finally {
       setIsLoading(false);
@@ -518,39 +600,39 @@ export default function App() {
 
   if (isLoggedIn) {
     return (
-      <div className="relative min-h-screen w-full bg-black overflow-x-hidden font-sans text-white flex">
+      <div className="relative min-h-screen w-full bg-[#020617] overflow-x-hidden font-sans text-white flex atmosphere-bg">
         {/* Sidebar */}
-        <aside className="w-20 lg:w-64 border-r border-white/10 bg-zinc-950/50 backdrop-blur-xl flex flex-col z-30 sticky top-0 h-screen">
+        <aside className="w-20 lg:w-64 border-r border-[#1e293b] bg-[#020617]/50 backdrop-blur-2xl flex flex-col z-30 sticky top-0 h-screen shadow-2xl">
           <div className="p-6 flex items-center gap-3">
-            <div className="p-2 bg-blue-600/20 rounded-xl border border-blue-500/20">
-              <Sparkles className="w-6 h-6 text-blue-400" />
+            <div className="p-2 bg-[#2563eb]/20 rounded-xl border border-[#3b82f6]/30">
+              <Sparkles className="w-6 h-6 text-[#60a5fa]" />
             </div>
-            <h1 className="hidden lg:block text-xl font-display font-bold tracking-tight">
-              Astral <span className="text-blue-500">SP</span>
+            <h1 className="hidden lg:block text-xl font-display font-medium tracking-tight">
+              Astral <span className="text-[#3b82f6]">SP</span>
             </h1>
           </div>
 
           <nav className="flex-1 px-4 py-6 space-y-2">
             <button 
               onClick={() => {setActiveTab('dashboard'); setSelectedEssay(null);}}
-              className={`w-full flex items-center gap-4 p-3 rounded-xl transition-all ${activeTab === 'dashboard' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-gray-500 hover:bg-white/5 hover:text-white'}`}
+              className={`w-full flex items-center gap-4 p-3 rounded-xl transition-all ${activeTab === 'dashboard' ? 'bg-[#2563eb] text-white shadow-[0_0_15px_rgba(37,99,235,0.3)]' : 'text-[#94a3b8] hover:bg-[#1e293b]/50 hover:text-white'}`}
             >
               <LayoutGrid className="w-6 h-6" />
-              <span className="hidden lg:block font-bold text-sm">Dashboard</span>
+              <span className="hidden lg:block font-medium text-sm tracking-wide">Dashboard</span>
             </button>
             <button 
               onClick={() => {setActiveTab('history'); setSelectedEssay(null);}}
-              className={`w-full flex items-center gap-4 p-3 rounded-xl transition-all ${activeTab === 'history' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-gray-500 hover:bg-white/5 hover:text-white'}`}
+              className={`w-full flex items-center gap-4 p-3 rounded-xl transition-all ${activeTab === 'history' ? 'bg-[#2563eb] text-white shadow-[0_0_15px_rgba(37,99,235,0.3)]' : 'text-[#94a3b8] hover:bg-[#1e293b]/50 hover:text-white'}`}
             >
               <History className="w-6 h-6" />
-              <span className="hidden lg:block font-bold text-sm">Rascunhos</span>
+              <span className="hidden lg:block font-medium text-sm tracking-wide">Rascunhos</span>
             </button>
             <button 
               onClick={() => {setActiveTab('settings'); setSelectedEssay(null);}}
-              className={`w-full flex items-center gap-4 p-3 rounded-xl transition-all ${activeTab === 'settings' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-gray-500 hover:bg-white/5 hover:text-white'}`}
+              className={`w-full flex items-center gap-4 p-3 rounded-xl transition-all ${activeTab === 'settings' ? 'bg-[#2563eb] text-white shadow-[0_0_15px_rgba(37,99,235,0.3)]' : 'text-[#94a3b8] hover:bg-[#1e293b]/50 hover:text-white'}`}
             >
               <Settings className="w-6 h-6" />
-              <span className="hidden lg:block font-bold text-sm">Configurações</span>
+              <span className="hidden lg:block font-medium text-sm tracking-wide">Configurações</span>
             </button>
           </nav>
 
@@ -575,9 +657,9 @@ export default function App() {
         </aside>
 
         {/* Main Content */}
-        <div className="flex-1 flex flex-col min-w-0">
+        <div className="flex-1 flex flex-col min-w-0 z-10">
           {/* Header */}
-          <header className="h-20 border-b border-white/10 bg-black/50 backdrop-blur-md flex items-center justify-between px-8 sticky top-0 z-20">
+          <header className="h-20 border-b border-[#1e293b] bg-[#020617]/40 backdrop-blur-3xl flex items-center justify-between px-8 sticky top-0 z-20">
             <div className="flex items-center gap-4">
               {selectedEssay && (
                 <button 
@@ -593,26 +675,26 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-4">
-              <div className="hidden md:flex items-center gap-6 px-6 py-2 bg-white/5 border border-white/10 rounded-2xl">
+              <div className="hidden md:flex items-center gap-6 px-6 py-2 bg-[#0f172a] border border-[#1e293b] rounded-2xl shadow-inner shadow-black/50">
                 <div className="text-center">
-                  <p className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">Total</p>
-                  <p className="text-sm font-display font-bold text-white">{stats.total}</p>
+                  <p className="meta-label mb-1">Total</p>
+                  <p className="text-sm font-mono tracking-tight text-white">{stats.total}</p>
                 </div>
-                <div className="w-px h-8 bg-white/10" />
+                <div className="w-px h-8 bg-[#1e293b]" />
                 <div className="text-center">
-                  <p className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">Pendentes</p>
-                  <p className="text-sm font-display font-bold text-blue-400">{stats.pending}</p>
+                  <p className="meta-label mb-1 text-blue-400">Pendentes</p>
+                  <p className="text-sm font-mono tracking-tight text-blue-400">{stats.pending}</p>
                 </div>
-                <div className="w-px h-8 bg-white/10" />
+                <div className="w-px h-8 bg-[#1e293b]" />
                 <div className="text-center">
-                  <p className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">Rascunhos</p>
-                  <p className="text-sm font-display font-bold text-amber-400">{stats.drafts}</p>
+                  <p className="meta-label mb-1 text-amber-500">Rascunhos</p>
+                  <p className="text-sm font-mono tracking-tight text-amber-400">{stats.drafts}</p>
                 </div>
               </div>
               
               <button 
                 onClick={() => setShowTimeModal(true)}
-                className="p-3 bg-blue-600/10 hover:bg-blue-600/20 border border-blue-500/20 rounded-xl text-blue-400 transition-all"
+                className="p-3 bg-[#1e293b]/50 hover:bg-[#2563eb]/20 border border-[#1e293b] hover:border-[#3b82f6]/50 rounded-xl text-blue-400 transition-all shadow-lg shadow-black/20"
               >
                 <Clock className="w-5 h-5" />
               </button>
@@ -684,18 +766,28 @@ export default function App() {
                     <div className="lg:col-span-7 space-y-6">
                       <div className="glass-card rounded-3xl p-8 h-full flex flex-col">
                         <div className="flex items-center justify-between mb-8">
-                          <h3 className="text-xl font-display font-bold text-white flex items-center gap-3">
-                            <Wand2 className="w-6 h-6 text-blue-400" />
+                          <h3 className="text-xl font-display font-medium text-white flex items-center gap-3">
+                            <Wand2 className="w-6 h-6 text-[#3b82f6]" />
                             Editor Astral
                           </h3>
-                          <button 
-                            onClick={handleGenerateEssay}
-                            disabled={isGenerating || isFetchingDetails}
-                            className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-blue-600/20 active:scale-95"
-                          >
-                            {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                            Gerar com IA
-                          </button>
+                          <div className="flex gap-3">
+                            <button 
+                              onClick={handleAutoGenerateAndSaveDraft}
+                              disabled={isGenerating || isFetchingDetails || isLoading}
+                              className="bg-[#2563eb] hover:bg-[#1d4ed8] disabled:opacity-50 text-white px-5 py-2.5 rounded-xl font-medium flex items-center gap-2 transition-all shadow-[0_0_15px_rgba(37,99,235,0.2)] active:scale-95 text-xs tracking-wide"
+                            >
+                              {isGenerating || isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                              Fazer em Rascunho
+                            </button>
+                            <button
+                              onClick={handleFinalize}
+                              disabled={isGenerating || isFetchingDetails || isLoading}
+                              className="bg-green-600 hover:bg-green-500 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl font-medium flex items-center gap-2 transition-all shadow-lg shadow-green-600/20 active:scale-95 text-xs tracking-wide"
+                            >
+                              {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                              Finalizar
+                            </button>
+                          </div>
                         </div>
 
                         <div className="flex-1 space-y-4">
@@ -706,33 +798,31 @@ export default function App() {
                               className="space-y-4 h-full flex flex-col"
                             >
                               <input 
-                                value={generatedEssay.titulo}
+                                value={generatedEssay.titulo || ''}
                                 onChange={(e) => setGeneratedEssay({...generatedEssay, titulo: e.target.value})}
-                                className="w-full bg-black/40 border border-white/10 rounded-2xl p-4 text-xl font-display font-bold text-white focus:outline-none focus:border-blue-500 transition-all"
+                                className="w-full bg-[#020617]/50 border border-[#1e293b] rounded-2xl p-4 text-xl font-display font-medium text-white focus:outline-none focus:border-[#3b82f6] transition-all"
                                 placeholder="Título da sua obra..."
                               />
                               <textarea 
-                                value={generatedEssay.texto}
+                                value={generatedEssay.texto || ''}
                                 onChange={(e) => setGeneratedEssay({...generatedEssay, texto: e.target.value})}
-                                className="flex-1 w-full min-h-[500px] bg-black/40 border border-white/10 rounded-2xl p-6 text-sm text-gray-300 leading-relaxed focus:outline-none focus:border-blue-500 resize-none custom-scrollbar transition-all"
+                                className="flex-1 w-full min-h-[500px] bg-[#020617]/50 border border-[#1e293b] rounded-2xl p-6 text-sm text-[#94a3b8] leading-relaxed focus:outline-none focus:border-[#3b82f6] resize-none custom-scrollbar transition-all"
                                 placeholder="Comece a escrever ou use a IA para guiar seus pensamentos..."
                               />
-                              <button 
-                                onClick={handleSaveDraft}
-                                disabled={isLoading}
-                                className="w-full bg-green-600 hover:bg-green-500 disabled:opacity-50 text-white py-4 rounded-2xl font-bold transition-all shadow-lg shadow-green-600/20 flex items-center justify-center gap-3 active:scale-[0.98]"
-                              >
-                                {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
-                                Salvar Rascunho Astral
-                              </button>
                             </motion.div>
                           ) : (
-                            <div className="flex-1 border-2 border-dashed border-white/5 rounded-3xl flex flex-col items-center justify-center text-center p-12 text-gray-600">
-                              <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mb-6 animate-pulse-slow">
-                                <Sparkles className="w-10 h-10 opacity-20" />
+                            <div className="flex-1 border-2 border-dashed border-[#1e293b] rounded-3xl flex flex-col items-center justify-center text-center p-12 text-[#94a3b8]">
+                              <div className="w-20 h-20 bg-[#1e293b]/50 rounded-full flex items-center justify-center mb-6 animate-pulse-slow">
+                                <Sparkles className="w-10 h-10 text-[#3b82f6]/50" />
                               </div>
-                              <h4 className="text-lg font-bold text-gray-400 mb-2">Editor Vazio</h4>
-                              <p className="text-sm max-w-xs">Use o poder da IA para manifestar sua redação ou comece a escrever sua própria jornada acadêmica.</p>
+                              <h4 className="text-lg font-medium text-[#f8fafc] mb-2">Editor Vazio</h4>
+                              <p className="text-sm max-w-sm mb-6">Use o botão <strong className="text-[#3b82f6]">Fazer em Rascunho</strong> para manifestar sua redação com IA automaticamente.</p>
+                              <button 
+                                onClick={() => setGeneratedEssay({ titulo: '', texto: '' })}
+                                className="text-xs text-[#3b82f6] hover:text-[#60a5fa] hover:underline transition-all"
+                              >
+                                Ou comece a escrever manualmente
+                              </button>
                             </div>
                           )}
                         </div>
@@ -841,43 +931,44 @@ export default function App() {
                             initial={{ opacity: 0, y: 20 }}
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ delay: idx * 0.05 }}
-                            className="glass-card rounded-3xl p-6 flex flex-col h-full group"
+                            className="glass-card p-6 flex flex-col h-full group"
                           >
                             <div className="flex justify-between items-start mb-4">
-                              <div className={`px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${
-                                essay.answer_status === 'draft' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/20' : 'bg-blue-500/20 text-blue-400 border border-blue-500/20'
+                              <div className={`px-2 py-[2px] rounded text-[9px] font-mono font-bold uppercase tracking-widest ${
+                                essay.answer_status === 'draft' ? 'bg-[#111] text-amber-500 border border-[#333]' : 'bg-[#111] text-blue-500 border border-blue-500/30'
                               }`}>
-                                {essay.answer_status === 'draft' ? 'Rascunho' : 'Pendente'}
+                                {essay.answer_status === 'draft' ? 'RASCUNHO' : 'PENDENTE'}
                               </div>
-                              <p className="text-[10px] text-gray-600 font-bold">ID: {essay.id}</p>
+                              <p className="data-value text-[10px]">ID:{essay.id}</p>
                             </div>
                             
-                            <h4 className="text-lg font-display font-bold text-white mb-6 line-clamp-2 group-hover:text-blue-400 transition-colors">
+                            <h4 className="text-sm font-sans font-medium text-[#ededed] mb-8 line-clamp-2 leading-relaxed group-hover:text-blue-500 transition-colors">
                               {essay.title}
                             </h4>
 
-                            <div className="mt-auto pt-6 border-t border-white/5 flex items-center justify-between">
-                              <div className="flex items-center gap-2 text-gray-500">
-                                <Clock className="w-4 h-4" />
-                                <span className="text-[10px] font-bold uppercase tracking-widest">Expira em 7 dias</span>
+                            <div className="mt-auto pt-4 border-t border-[#2a2a2a] flex items-center justify-between">
+                              <div className="flex items-center gap-2 text-[#8e9299]">
+                                <Clock className="w-3.5 h-3.5" />
+                                <span className="meta-label">7 DIAS</span>
                               </div>
                               <button 
                                 onClick={() => handleStartEssay(essay)}
-                                className="p-3 bg-white/5 hover:bg-blue-600 rounded-2xl text-gray-400 hover:text-white transition-all border border-white/5 hover:border-blue-500 active:scale-90"
+                                className="p-2 bg-[#111] hover:bg-blue-600 rounded-lg text-[#8e9299] hover:text-white transition-all border border-[#2a2a2a] hover:border-blue-500 active:scale-95"
                               >
-                                <ChevronRight className="w-5 h-5" />
+                                <ChevronRight className="w-4 h-4" />
                               </button>
                             </div>
                           </motion.div>
                         ))}
                       </div>
                     ) : (
-                      <div className="glass-card rounded-[40px] py-32 flex flex-col items-center justify-center text-center px-12">
-                        <div className="w-24 h-24 bg-white/5 rounded-full flex items-center justify-center mb-8 border border-white/5">
-                          <BookOpen className="w-12 h-12 text-gray-700" />
+                      <div className="glass-card rounded-2xl py-32 flex flex-col items-center justify-center text-center px-12 relative overflow-hidden">
+                        <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-blue-500/50 to-transparent"></div>
+                        <div className="w-20 h-20 bg-[#111] rounded-2xl border border-[#333] flex items-center justify-center mb-8 shadow-inner shadow-black/50">
+                          <BookOpen className="w-8 h-8 text-neutral-600" />
                         </div>
-                        <h3 className="text-2xl font-display font-bold text-gray-300 mb-3">Nenhuma tarefa encontrada</h3>
-                        <p className="text-gray-500 max-w-sm leading-relaxed">Seu universo acadêmico está em harmonia. Não há redações pendentes ou rascunhos nesta sala no momento.</p>
+                        <h3 className="text-2xl font-mono tracking-tight text-white mb-2 uppercase opacity-80">0 RESULTADOS ENCONTRADOS</h3>
+                        <p className="text-[#8e9299] max-w-sm text-sm font-sans tracking-wide">Sem redações pendentes neste escopo. A plataforma não retornou tarefas ativas.</p>
                       </div>
                     )}
                   </div>
@@ -1083,16 +1174,16 @@ export default function App() {
             </AnimatePresence>
 
             <div className="space-y-3">
-              <label className="text-[10px] uppercase tracking-widest font-bold text-gray-500 ml-1">Registro Acadêmico (RA)</label>
+              <label className="meta-label ml-1">Registro Acadêmico (RA)</label>
               <div className="relative group">
                 <div className="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none">
-                  <User className="h-5 w-5 text-slate-400 group-focus-within:text-blue-900 transition-colors" />
+                  <User className="h-5 w-5 text-[#94a3b8] group-focus-within:text-[#3b82f6] transition-colors" />
                 </div>
                 <input
                   type="text"
                   value={ra}
                   onChange={(e) => setRa(e.target.value)}
-                  className="block w-full pl-14 pr-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-900/20 focus:border-blue-900 transition-all font-medium"
+                  className="block w-full pl-14 pr-5 py-4 bg-[#0f172a] border border-[#1e293b] rounded-2xl text-white placeholder-[#475569] focus:outline-none focus:ring-1 focus:ring-[#3b82f6] focus:border-[#3b82f6] transition-all font-mono tracking-tight"
                   placeholder="Seu RA (ex: 123456789sp)"
                   required
                 />
@@ -1100,23 +1191,23 @@ export default function App() {
             </div>
 
             <div className="space-y-3">
-              <label className="text-[10px] uppercase tracking-widest font-bold text-slate-500 ml-1">Senha de Acesso</label>
+              <label className="meta-label ml-1">Senha de Acesso</label>
               <div className="relative group">
                 <div className="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none">
-                  <Lock className="h-5 w-5 text-slate-400 group-focus-within:text-blue-900 transition-colors" />
+                  <Lock className="h-5 w-5 text-[#94a3b8] group-focus-within:text-[#3b82f6] transition-colors" />
                 </div>
                 <input
                   type={showPassword ? "text" : "password"}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="block w-full pl-14 pr-12 py-4 bg-slate-50 border border-slate-200 rounded-2xl text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-900/20 focus:border-blue-900 transition-all font-medium"
+                  className="block w-full pl-14 pr-12 py-4 bg-[#0f172a] border border-[#1e293b] rounded-2xl text-white placeholder-[#475569] focus:outline-none focus:ring-1 focus:ring-[#3b82f6] focus:border-[#3b82f6] transition-all font-mono tracking-tight"
                   placeholder="••••••••"
                   required
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-400 hover:text-blue-900 transition-colors"
+                  className="absolute inset-y-0 right-0 pr-4 flex items-center text-[#94a3b8] hover:text-[#3b82f6] transition-colors"
                 >
                   {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
                 </button>
@@ -1140,7 +1231,7 @@ export default function App() {
                   }
                 }
               }}
-              className="relative w-full group overflow-hidden rounded-2xl bg-blue-900 py-4.5 font-bold text-white transition-all hover:bg-blue-800 active:scale-[0.98] disabled:opacity-70 shadow-md"
+              className="relative w-full group overflow-hidden rounded-2xl bg-[#2563eb] py-4 font-bold text-white transition-all hover:bg-[#1d4ed8] active:scale-[0.98] shadow-[0_0_20px_rgba(37,99,235,0.2)]"
             >
               <span className="relative z-10 flex items-center justify-center gap-3">
                 Redações pendentes
@@ -1165,36 +1256,38 @@ export default function App() {
       {/* Selection Modal (Batch Processing) */}
       <AnimatePresence mode="wait">
         {showSelectionModal && (
-          <div key="selection-modal-overlay" className="fixed inset-0 z-50 flex items-center justify-center px-4 bg-black/90 backdrop-blur-md">
+          <div key="selection-modal-overlay" className="fixed inset-0 z-50 flex items-center justify-center px-4 bg-[#020617]/90 backdrop-blur-md">
             <motion.div
               key="selection-modal-content"
               initial={{ opacity: 0, scale: 0.9, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="glass border border-slate-200 rounded-[30px] p-10 max-w-2xl w-full shadow-lg overflow-hidden flex flex-col max-h-[85vh]"
+              className="bg-[#0f172a] border border-[#1e293b] rounded-[30px] p-10 max-w-2xl w-full shadow-2xl overflow-hidden flex flex-col max-h-[85vh] relative"
             >
+              <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-[#3b82f6]/50 to-transparent"></div>
+              
               <div className="flex justify-between items-start mb-8">
                 <div>
-                  <h3 className="text-3xl font-display font-bold text-white mb-2">Redações Pendentes</h3>
-                  <p className="text-gray-400 text-sm">Escolha uma redação abaixo para começar a escrever.</p>
+                  <h3 className="text-3xl font-display font-medium text-white mb-2">Redações Pendentes</h3>
+                  <p className="text-[#94a3b8] text-sm">Escolha uma redação abaixo para começar a escrever.</p>
                 </div>
                 <div className="flex flex-col gap-2">
                   <div className="flex items-center gap-2">
-                    <label className="text-[10px] text-gray-500 font-bold uppercase">Min</label>
-                    <input type="number" className="w-16 p-1 bg-black/40 border border-white/5 rounded text-white text-xs" placeholder="0" />
+                    <label className="meta-label">Min</label>
+                    <input type="number" className="w-16 p-1 bg-[#1e293b]/50 border border-[#1e293b] rounded text-[#f8fafc] text-xs font-mono focus:border-[#3b82f6] focus:outline-none" placeholder="0" />
                   </div>
                   <div className="flex items-center gap-2">
-                    <label className="text-[10px] text-gray-500 font-bold uppercase">Max</label>
-                    <input type="number" className="w-16 p-1 bg-black/40 border border-white/5 rounded text-white text-xs" placeholder="60" />
+                    <label className="meta-label">Max</label>
+                    <input type="number" className="w-16 p-1 bg-[#1e293b]/50 border border-[#1e293b] rounded text-[#f8fafc] text-xs font-mono focus:border-[#3b82f6] focus:outline-none" placeholder="60" />
                   </div>
                 </div>
                   <div className="flex items-center gap-2">
-                    <button onClick={() => setShowDiscordModal(true)} className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500 hover:text-blue-900">
+                    <button onClick={() => setShowDiscordModal(true)} className="p-2 hover:bg-[#1e293b] rounded-full transition-colors text-[#94a3b8] hover:text-[#3b82f6]">
                       <DiscordIcon className="w-6 h-6" />
                     </button>
                     <button 
                       onClick={() => !isBatchProcessing && setShowSelectionModal(false)} 
-                      className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500 hover:text-slate-900"
+                      className="p-2 hover:bg-[#1e293b] rounded-full transition-colors text-[#94a3b8] hover:text-[#f8fafc]"
                     >
                       <X className="w-6 h-6" />
                     </button>
@@ -1218,7 +1311,7 @@ export default function App() {
               )}
 
               <div className="flex items-center justify-between mb-6 px-2">
-                <span className="text-[10px] text-gray-600 font-bold uppercase tracking-widest">
+                <span className="meta-label">
                   {aggregatedEssays.length} redações encontradas
                 </span>
               </div>
@@ -1228,20 +1321,16 @@ export default function App() {
                   aggregatedEssays.map((essay) => (
                     <div 
                       key={essay.id}
-                      className="flex items-center gap-5 p-5 rounded-3xl border transition-all bg-white/5 border-white/5 hover:bg-white/10"
+                      className="flex items-center gap-5 p-5 rounded-2xl border transition-all bg-[#1e293b]/30 border-[#1e293b] hover:bg-[#1e293b]/60 hover:border-[#3b82f6]/50 group"
                     >
                       <div className="flex-1 min-w-0">
-                        <h4 className="text-sm font-bold text-white truncate">{essay.title}</h4>
-                        <div className="flex items-center gap-3 mt-1">
-                          <span className="text-[9px] text-gray-600 font-bold uppercase tracking-widest">ID: {essay.id}</span>
-                          <span className="text-[9px] text-blue-400 font-bold uppercase tracking-widest">• {essay.publication_target}</span>
-                          <span className={`text-[9px] font-bold uppercase tracking-widest ${essay.answer_status === 'draft' ? 'text-amber-500' : 'text-blue-500'}`}>
-                            • {essay.answer_status === 'draft' ? 'Rascunho' : 'Pendente'}
+                        <h4 className="text-sm font-sans font-medium text-white truncate group-hover:text-[#3b82f6] transition-colors">{essay.title}</h4>
+                        <div className="flex items-center gap-3 mt-2">
+                          <span className="data-value text-[10px]">ID:{essay.id}</span>
+                          <span className="meta-label text-[#3b82f6]/70">• {essay.publication_target}</span>
+                          <span className={`meta-label ${essay.answer_status === 'draft' ? 'text-amber-500' : 'text-[#3b82f6]'}`}>
+                            • {essay.answer_status === 'draft' ? 'RASCUNHO' : 'PENDENTE'}
                           </span>
-                        </div>
-                        <div className="flex items-center gap-2 mt-2">
-                          <input type="number" placeholder="Min" className="w-16 p-1 bg-black/40 border border-white/5 rounded text-white text-xs" />
-                          <input type="number" placeholder="Max" className="w-16 p-1 bg-black/40 border border-white/5 rounded text-white text-xs" />
                         </div>
                       </div>
                       <button
@@ -1249,7 +1338,7 @@ export default function App() {
                           setShowSelectionModal(false);
                           console.log('Fazer Redação clicked for:', essay.id);
                         }}
-                        className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl transition-all"
+                        className="px-4 py-2 bg-[#2563eb] hover:bg-[#1d4ed8] text-white text-xs font-bold rounded-xl transition-all shadow-[0_0_15px_rgba(37,99,235,0.2)]"
                       >
                         Fazer
                       </button>
