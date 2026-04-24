@@ -262,40 +262,50 @@ async function startServer() {
 
       for (const domain of eduspDomains) {
         console.log(`[Login] Tentando obter token em: ${domain}`);
-        const vsfApi = await win.fetch(`${domain}/registration/edusp/token`, {
-          method: "POST",
-          headers: {
-            "accept": "application/json",
-            "content-type": "application/json",
-            "request-id": "|625bd2809ec74cc5bf522f4837291586.34b5d944b713472b",
-            "sec-ch-ua": "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"Google Chrome\";v=\"144\"",
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": "\"Windows\"",
-            "traceparent": "00-625bd2809ec74cc5bf522f4837291586-34b5d944b713472b-01",
-            "x-api-platform": "webclient",
-            "x-api-realm": "edusp",
-            "user-agent": userAgentString,
-            "origin": "https://saladofuturo.educacao.sp.gov.br",
-            "referer": "https://saladofuturo.educacao.sp.gov.br/"
-          },
-          body: JSON.stringify({
-            token: initialToken
-          })
-        });
+        try {
+          const vsfApi = await win.fetch(`${domain}/registration/edusp/token`, {
+            method: "POST",
+            headers: {
+              "accept": "application/json",
+              "content-type": "application/json",
+              "request-id": "|625bd2809ec74cc5bf522f4837291586.34b5d944b713472b",
+              "sec-ch-ua": "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"Google Chrome\";v=\"144\"",
+              "sec-ch-ua-mobile": "?0",
+              "sec-ch-ua-platform": "\"Windows\"",
+              "traceparent": "00-625bd2809ec74cc5bf522f4837291586-34b5d944b713472b-01",
+              "x-api-platform": "webclient",
+              "x-api-realm": "edusp",
+              "user-agent": userAgentString,
+              "origin": "https://saladofuturo.educacao.sp.gov.br",
+              "referer": "https://saladofuturo.educacao.sp.gov.br/"
+            },
+            body: JSON.stringify({
+              token: initialToken
+            })
+          });
 
-        if (vsfApi.ok) {
-          step2Data = await vsfApi.json();
-          successDomain = domain;
-          break;
-        } else {
-          lastLoginErrorText = await vsfApi.text();
-          console.warn(`[Login] Falha no domínio ${domain}: ${vsfApi.status}`);
+          if (vsfApi.ok) {
+            step2Data = await vsfApi.json();
+            successDomain = domain;
+            break;
+          } else {
+            lastLoginErrorText = await vsfApi.text();
+            console.warn(`[Login] Falha no domínio ${domain}: ${vsfApi.status}`);
+          }
+        } catch (err: any) {
+          console.warn(`[Login] Falha de rede no domínio ${domain}: ${err.message}`);
+          lastLoginErrorText = `Erro de rede: ${err.message}`;
         }
       }
 
       if (!step2Data) {
-        console.error(`[Login] Erro ao obter Token Edusp em todos os domínios. Último erro: ${lastLoginErrorText.substring(0, 500)}`);
-        return res.status(403).json({ error: "Falha na conversão do token da Edusp. O acesso foi bloqueado (Cloudflare)." });
+        console.warn(`[Login] Erro ao obter Token Edusp em todos os domínios. Último erro: ${lastLoginErrorText.substring(0, 500)}`);
+        console.log(`[Login] Fallback: Utilizando o primeiro token capturado (CMSP).`);
+        return res.json({ 
+          success: true, 
+          auth_token: initialToken,
+          nick: user
+        });
       }
 
       console.log(`[Login] Operação Phantom Proxy finalizada com Sucesso! (Usando ${successDomain})`);
