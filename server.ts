@@ -50,8 +50,7 @@ async function startServer() {
   // Helper for official API calls
   const callOfficialApi = async (url: string, method: string, token: string, body?: any) => {
     const domains = [
-      'https://edusp-api.ip.tv',
-      'https://api.educacao.sp.gov.br'
+      'https://edusp-api.ip.tv'
     ];
     
     let lastError: any = null;
@@ -86,10 +85,10 @@ async function startServer() {
         const contentType = response.headers.get("content-type");
         console.log(`[API Response] ${targetUrl}: ${response.status} Content-Type: ${contentType}`);
 
-        if (response.status === 403) {
+        if (response.status === 403 && contentType && contentType.includes("text/html")) {
           const text = await response.text();
-          if (text.includes('cloudflare') || text.includes('challenge')) {
-            console.warn(`[API Blocked] Cloudflare challenge detected on ${domain}`);
+          if (text.includes('cloudflare') || text.includes('challenge') || text.includes('Origin DNS error')) {
+            console.warn(`[API Blocked] Cloudflare challenge or DNS error detected on ${domain}`);
           }
           lastError = { status: 403, message: `Acesso bloqueado pela proteção anti-bot em ${domain}.` };
           continue;
@@ -98,6 +97,12 @@ async function startServer() {
         if (!response.ok) {
           const errorText = await response.text();
           console.error(`[API Error Response] ${targetUrl}: ${response.status}`, errorText);
+          
+          if (response.status === 530 && errorText.includes('Origin DNS error')) {
+            lastError = { status: 530, message: `Erro 1016 origin-dns-error no domínio ${domain}.` };
+            continue; // Tenta o próximo domínio
+          }
+
           if (response.status === 401 || response.status === 403 || response.status === 400) {
             throw { status: response.status, message: errorText, isAuthError: true };
           }
@@ -260,8 +265,7 @@ async function startServer() {
       console.log(`[Login] Passo 3: Obtendo auth_token oficial da Edusp...`);
       
       const eduspDomains = [
-        "https://edusp-api.ip.tv",
-        "https://api.educacao.sp.gov.br"
+        "https://edusp-api.ip.tv"
       ];
       
       let lastLoginErrorText = "";
