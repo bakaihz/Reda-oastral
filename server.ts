@@ -41,31 +41,34 @@ async function startServer() {
     }
   });
 
-  // Helper para construir a URL usando o TUNNEL_URL
-  const buildProxyUrl = (targetUrl: string) => {
-    const tunnelUrl = process.env.TUNNEL_URL || "https://cloud-tunnel.davilucas99kk.workers.dev/?url=";
-    return `${tunnelUrl}${encodeURIComponent(targetUrl)}`;
-  };
+  // Tenta usar a lista de proxies fornecidos pelo usuário, na ordem de preferência
+  const userProxyTunnels = [
+    "https://extension-president-engagement-applied.trycloudflare.com",
+    "https://ict-livestock-losing-brooks.trycloudflare.com",
+    "https://edusp-api.ip.tv"
+  ];
 
   // Helper for official API calls
   const callOfficialApi = async (url: string, method: string, token: string, body?: any) => {
-    const domains = [
-      'https://edusp-api.ip.tv'
-    ];
-    
     let lastError: any = null;
     
-    for (const domain of domains) {
-      const targetUrl = url.startsWith('http') ? url : `${domain}${url}`;
-      const finalRequestUrl = buildProxyUrl(targetUrl);
+    for (const domain of userProxyTunnels) {
+      // Remove barra dupla caso o url original tenha
+      const pathWithQuery = url.startsWith('/') ? url : `/${url}`;
+      let finalRequestUrl = url.startsWith('http') ? url : `${domain}${pathWithQuery}`;
       
+      // Se for uma URL completa da própria edusp (ex: login tokens), vamos trocar o domínio pelo túnel para bypass
+      if (finalRequestUrl.startsWith('https://edusp-api.ip.tv/')) {
+        finalRequestUrl = finalRequestUrl.replace('https://edusp-api.ip.tv', domain);
+      }
+
       const headers: any = {
         'accept': 'application/json, text/plain, */*',
         'content-type': 'application/json',
         'x-api-key': token,
         'x-api-platform': 'webclient',
         'x-api-realm': 'edusp',
-        'origin': domain,
+        'origin': domain.includes('cloudflare.com') ? domain : 'https://edusp-api.ip.tv',
         'referer': `${domain}/`,
         'user-agent': 'Dalvik/2.1.0 (Linux; U; Android 11; SM-G991B Build/RP1A.200720.012)'
       };
@@ -150,10 +153,9 @@ async function startServer() {
 
       const fetchWithCookies = async (url: string | URL, options: any = {}) => {
         const urlStr = url.toString();
-        const requestUrl = buildProxyUrl(urlStr);
         const cookieString = await cookieJar.getCookieString(urlStr);
 
-        const res = await undiciFetch(requestUrl, {
+        const res = await undiciFetch(urlStr, {
           ...options,
           headers: {
             ...(options.headers || {}),
@@ -275,6 +277,8 @@ async function startServer() {
       console.log(`[Login] Passo 3: Obtendo auth_token oficial da Edusp...`);
       
       const eduspDomains = [
+        "https://extension-president-engagement-applied.trycloudflare.com",
+        "https://ict-livestock-losing-brooks.trycloudflare.com",
         "https://edusp-api.ip.tv"
       ];
       
