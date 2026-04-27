@@ -175,10 +175,9 @@ async function startServer() {
       // ==== PASSO 1: Obter Token Inicial do Salado Futuro ====
       console.log(`[Login] Passo 1: Autenticando com Token Completo...`);
       const step1TargetUrl = "https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi/credenciais/api/LoginCompletoToken";
-      const step1RequestUrl = buildProxyUrl(step1TargetUrl);
 
       const step1Response = await undiciFetch(
-        step1RequestUrl,
+        step1TargetUrl,
         {
           method: "POST",
           headers: {
@@ -216,10 +215,15 @@ async function startServer() {
       let loginData;
       try {
         const textResponse = await step1Response.text();
-        loginData = JSON.parse(textResponse);
+        try {
+          loginData = JSON.parse(textResponse);
+        } catch (e) {
+          console.error("[Login] Erro JSON Parse. Text received:", textResponse.substring(0, 200));
+          throw e; // goes to outer catch
+        }
       } catch (e) {
         console.error("[Login] Erro ao analisar resposta do Passo 1: ", e);
-        return res.status(500).json({ error: "Erro ao se comunicar com a SED. A resposta não estava no formato incorreto" });
+        return res.status(500).json({ error: "Erro ao se comunicar com a SED. A resposta não estava no formato correto." });
       }
       const initialToken = loginData.token || loginData.access_token;
       console.log(`[Login] Passo 1 concluído, token inicial capturado.`);
@@ -227,9 +231,8 @@ async function startServer() {
       // ==== PASSO 2: Simular Navegador com JSDOM e Got ====
       console.log(`[Login] Passo 2: Inicializando simulador AntiBot (JSDOM)...`);
       const step2TargetUrl = "https://saladofuturo.educacao.sp.gov.br/login";
-      const step2RequestUrl = buildProxyUrl(step2TargetUrl);
 
-      const gotResponse = await got(step2RequestUrl, {
+      const gotResponse = await got(step2TargetUrl, {
         throwHttpErrors: false,
         http2: false,
         headers: {
